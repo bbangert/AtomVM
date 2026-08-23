@@ -20,3 +20,7 @@ CONFIG_SPIRAM_IGNORE_NOTFOUND=y
 # against a full certificate chain.
 CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
 
+# libsodium's Ed25519 verification overflows the 3584-byte default main task
+# stack. The symptom is a reset on the first update, not a bad-signature report.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
+
