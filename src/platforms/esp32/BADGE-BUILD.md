@@ -1,8 +1,14 @@
 # Reproducing the badge VM build
 
-Steps needed to reproduce the `atomvm-esp32.bin` built against
-`partitions-elixir.csv` with libsodium and the WebSocket transport linked in,
-beyond a plain `idf.py build`.
+`src/platforms/esp32/CMakeLists.txt` now defaults `-DAVM_USE_LIBSODIUM=ON`,
+`-DATOMVM_ELIXIR_SUPPORT=on`, and (when the `atomvm_websocket_client` repo is
+checked out as a sibling of this `AtomVM` checkout, i.e.
+`../atomvm_websocket_client` from the AtomVM checkout root)
+`-DEXTRA_COMPONENT_DIRS` for this fork, so a bare `idf.py build` already
+produces `atomvm-esp32.bin` built against `partitions-elixir.csv` with
+libsodium and the WebSocket transport linked in. Passing any of these flags
+explicitly still overrides the default. The one remaining manual step is
+below.
 
 ## Prerequisite: patch the WebSocket component checkout
 
@@ -25,24 +31,30 @@ work around it.
 ```
 cd src/platforms/esp32
 . $IDF_PATH/export.sh
-idf.py -DAVM_USE_LIBSODIUM=ON \
-       -DEXTRA_COMPONENT_DIRS=<path to atomvm_websocket_client checkout> \
-       -DATOMVM_ELIXIR_SUPPORT=on \
-       set-target esp32s3
+idf.py set-target esp32s3
 idf.py build
 ```
 
-`-DATOMVM_ELIXIR_SUPPORT=on` is required, not optional: without it
-`AVM_PARTITION_TABLE_FILENAME` in `CMakeLists.txt` falls back to
+No `-D` flags are needed if `atomvm_websocket_client` is checked out as a
+sibling of this `AtomVM` checkout (see above); the defaults in
+`CMakeLists.txt` cover all three. If it is not a sibling, or you want a
+different checkout, pass `-DEXTRA_COMPONENT_DIRS=<path>` explicitly. If you
+need to build *without* Elixir support or libsodium (e.g. reproducing
+upstream), pass `-DATOMVM_ELIXIR_SUPPORT=off` / `-DAVM_USE_LIBSODIUM=OFF`
+explicitly -- an explicit `-D` always overrides the badge-fork default.
+
+`ATOMVM_ELIXIR_SUPPORT` matters, not just cosmetically: without it (or its
+default) `AVM_PARTITION_TABLE_FILENAME` in `CMakeLists.txt` falls back to
 `partitions.csv` instead of `partitions-elixir.csv`, silently building
 against the wrong partition table. There is no `flash-elixir` target in this
 revision to do this for you.
 
-Use `set-target`, not `reconfigure`: CMake caches its component list, so a
-plain `idf.py build` after adding `-DEXTRA_COMPONENT_DIRS` or
-`-DAVM_USE_LIBSODIUM=ON` to an existing build directory reports success
-without ever compiling the new component in. `set-target` clears the build
-directory and the generated `sdkconfig` first.
+Use `set-target`, not `reconfigure`, any time you change `-D` flags away from
+the defaults: CMake caches its component list, so a plain `idf.py build`
+after adding `-DEXTRA_COMPONENT_DIRS` or `-DAVM_USE_LIBSODIUM=ON` to an
+existing build directory reports success without ever compiling the new
+component in. `set-target` clears the build directory and the generated
+`sdkconfig` first.
 
 ## sdkconfig.defaults is generated
 
