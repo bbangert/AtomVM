@@ -17,8 +17,15 @@ CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=4096
 CONFIG_SPIRAM_IGNORE_NOTFOUND=y
 
 # TLS handshakes allocate many small bignums; internal RAM alone runs out
-# against a full certificate chain.
+# against a full certificate chain, and mbedtls_ssl_setup answers
+# MBEDTLS_ERR_SSL_ALLOC_FAILED without this.
 CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
+
+# Size the TLS record buffers to the handshake in progress rather than holding
+# 16K in and 4K out for the life of every connection.
+CONFIG_MBEDTLS_DYNAMIC_BUFFER=y
+CONFIG_MBEDTLS_DYNAMIC_FREE_PEER_CERT=y
+CONFIG_MBEDTLS_DYNAMIC_FREE_CONFIG_DATA=y
 
 # libsodium's Ed25519 verification overflows the 3584-byte default main task
 # stack. The symptom is a reset on the first update, not a bad-signature report.
