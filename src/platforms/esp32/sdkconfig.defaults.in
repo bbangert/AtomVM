@@ -24,3 +24,11 @@ CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
 # stack. The symptom is a reset on the first update, not a bad-signature report.
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
 
+
+# ngrok's edge negotiates TLS 1.3 by default and refuses the legacy 1.2-only
+# ClientHello mbedTLS sends without this, closing before any alert.
+CONFIG_MBEDTLS_SSL_PROTO_TLS1_3=y
+
+# -Og left the VM at 98.2% of `factory`, which TLS 1.3 then overflowed by 384
+# bytes. Assertions are a separate knob and stay on.
+CONFIG_COMPILER_OPTIMIZATION_SIZE=y
