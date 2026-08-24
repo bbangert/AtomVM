@@ -1352,6 +1352,13 @@ static void start_network(Context *ctx, term pid, term ref, term config)
         ESP_LOGI(TAG, "WIFI started");
     }
 
+    // Modem power save holds inbound frames at the AP until the next DTIM,
+    // which adds ~100-200ms to every delivery and pushes a TLS handshake
+    // past what a strict edge allows. Trade standby current for latency.
+    if ((err = esp_wifi_set_ps(WIFI_PS_NONE)) != ESP_OK) {
+        ESP_LOGW(TAG, "Error in esp_wifi_set_ps %d", err);
+    }
+
     //
     // Set up simple NTP, if configured
     //

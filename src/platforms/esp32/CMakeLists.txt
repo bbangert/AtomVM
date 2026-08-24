@@ -170,3 +170,12 @@ endif()
 if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/nvs_partition.csv")
     nvs_create_partition_image(nvs "${CMAKE_CURRENT_SOURCE_DIR}/nvs_partition.csv")
 endif()
+
+# The global -Os is slowest exactly where the TLS handshake spends its time.
+# ECC verification has to beat ngrok's ~1s edge deadline, so the crypto
+# objects alone are compiled for speed.
+foreach(crypto_target mbedcrypto mbedtls mbedx509)
+    if(TARGET ${crypto_target})
+        target_compile_options(${crypto_target} PRIVATE -O2)
+    endif()
+endforeach()
