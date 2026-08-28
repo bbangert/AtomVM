@@ -13,7 +13,12 @@ CONFIG_SPIRAM_MODE_QUAD=y
 CONFIG_SPIRAM_TYPE_AUTO=y
 CONFIG_SPIRAM_SPEED_80M=y
 CONFIG_SPIRAM_USE_MALLOC=y
-CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=4096
+# Plain allocations below this come out of internal RAM, which is only ~300K
+# and is also the only place FreeRTOS task stacks and DMA buffers can live.
+# At 4096 the 1K chunk binaries a partition read produces landed there and
+# accumulated as garbage - AtomVM's heap is in PSRAM, so nothing made it
+# collect - until a websocket client could not allocate its task.
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=512
 CONFIG_SPIRAM_IGNORE_NOTFOUND=y
 
 # TLS working memory lives in PSRAM. Internal RAM cannot hold it: DMA buffers
