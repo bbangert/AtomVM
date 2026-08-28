@@ -41,6 +41,7 @@
 -export([
     nif_close_notify/1,
     nif_conf_authmode/2,
+    nif_conf_crt_bundle/1,
     nif_conf_rng/2,
     nif_config_defaults/3,
     nif_config_init/0,
@@ -79,7 +80,7 @@
 -type socket_option() :: gen_tcp:connect_option() | gen_tcp:listen_option().
 -type tls_client_option() :: client_option() | socket_option().
 -type client_option() ::
-    {server_name_indication, sni()} | {verify, verify_none}.
+    {server_name_indication, sni()} | {verify, verify_none | verify_peer}.
 
 -type sni() :: hostname() | disabled.
 -type reason() :: any().
@@ -216,6 +217,12 @@ process_options(SSLContext, SSLConfig, [{server_name_indication, disabled} | Tai
     process_options(SSLContext, SSLConfig, Tail);
 process_options(SSLContext, SSLConfig, [{server_name_indication, Hostname} | Tail]) ->
     ok = ?MODULE:nif_set_hostname(SSLContext, Hostname),
+    process_options(SSLContext, SSLConfig, Tail);
+%% Verification needs a trust anchor, and the only one a device has is the CA
+%% bundle ESP-IDF compiles into the image.
+process_options(SSLContext, SSLConfig, [{verify, verify_peer} | Tail]) ->
+    ok = ?MODULE:nif_conf_authmode(SSLConfig, required),
+    ok = ?MODULE:nif_conf_crt_bundle(SSLConfig),
     process_options(SSLContext, SSLConfig, Tail);
 process_options(SSLContext, SSLConfig, [{verify, verify_none} | Tail]) ->
     ok = ?MODULE:nif_conf_authmode(SSLConfig, none),
@@ -363,6 +370,11 @@ nif_config_defaults(_Config, _Endpoint, _Transport) ->
 %% @private
 -spec nif_conf_authmode(Config :: sslconfig(), none | optional | required) -> ok.
 nif_conf_authmode(_Config, _AuthMode) ->
+    erlang:nif_error(undefined).
+
+%% @private
+-spec nif_conf_crt_bundle(Config :: sslconfig()) -> ok | error.
+nif_conf_crt_bundle(_Config) ->
     erlang:nif_error(undefined).
 
 %% @private

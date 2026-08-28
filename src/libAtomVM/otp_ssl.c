@@ -43,6 +43,14 @@
 #include <psa/crypto.h>
 #endif
 
+// ESP-IDF compiles a CA bundle into the image. Without it there is no way to
+// supply a trust anchor from Erlang and every verified handshake ends in
+// MBEDTLS_ERR_SSL_CA_CHAIN_REQUIRED.
+#if defined(ESP_PLATFORM) && defined(CONFIG_MBEDTLS_CERTIFICATE_BUNDLE)
+#include <esp_crt_bundle.h>
+#define AVM_SSL_HAVE_CRT_BUNDLE 1
+#endif
+
 // #define ENABLE_TRACE
 #include <trace.h>
 
@@ -437,6 +445,31 @@ static term nif_ssl_set_hostname(Context *ctx, int argc, term argv[])
     return OK_ATOM;
 }
 
+#ifdef AVM_SSL_HAVE_CRT_BUNDLE
+static term nif_ssl_conf_crt_bundle(Context *ctx, int argc, term argv[])
+{
+    TRACE("%s\n", __func__);
+    UNUSED(argc);
+
+    void *rsrc_obj_ptr;
+    if (UNLIKELY(!enif_get_resource(erl_nif_env_from_context(ctx), argv[0], sslconfig_resource_type, &rsrc_obj_ptr))) {
+        RAISE_ERROR(BADARG_ATOM);
+    }
+    struct SSLConfigResource *rsrc_obj = (struct SSLConfigResource *) rsrc_obj_ptr;
+
+    if (UNLIKELY(esp_crt_bundle_attach(&rsrc_obj->config) != ESP_OK)) {
+        return ERROR_ATOM;
+    }
+
+    return OK_ATOM;
+}
+
+static const struct Nif ssl_conf_crt_bundle_nif = {
+    .base.type = NIFFunctionType,
+    .nif_ptr = nif_ssl_conf_crt_bundle
+};
+#endif
+
 static term nif_ssl_conf_authmode(Context *ctx, int argc, term argv[])
 {
     TRACE("%s\n", __func__);
@@ -781,6 +814,12 @@ const struct Nif *otp_ssl_nif_get_nif(const char *nifname)
             TRACE("Resolved platform nif %s ...\n", nifname);
             return &ssl_config_defaults_nif;
         }
+#ifdef AVM_SSL_HAVE_CRT_BUNDLE
+        if (strcmp("nif_conf_crt_bundle/1", rest) == 0) {
+            TRACE("Resolved platform nif %s ...\n", nifname);
+            return &ssl_conf_crt_bundle_nif;
+        }
+#endif
         if (strcmp("nif_conf_authmode/2", rest) == 0) {
             TRACE("Resolved platform nif %s ...\n", nifname);
             return &ssl_conf_authmode_nif;
