@@ -29,7 +29,8 @@
     sta_disconnect/0,
     sta_connect/0, sta_connect/1,
     sta_status/0,
-    wifi_scan/0, wifi_scan/1
+    wifi_scan/0, wifi_scan/1,
+    set_power_save/1
 ]).
 -export([start/1, start_link/1, stop/0]).
 -export([
@@ -683,6 +684,16 @@ wifi_scan() ->
         _ ->
             {error, unsupported_platform}
     end.
+
+%%-----------------------------------------------------------------------------
+%% @param   Mode wifi power save mode
+%% @doc     Sets the station power save mode at runtime.
+%% @returns `ok | error'
+%% @end
+%%-----------------------------------------------------------------------------
+-spec set_power_save(Mode :: none | min_modem | max_modem) -> ok | error.
+set_power_save(_Mode) ->
+    erlang:nif_error(undefined).
 
 %%
 %% gen_server callbacks

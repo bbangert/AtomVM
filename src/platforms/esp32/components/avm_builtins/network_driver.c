@@ -2001,4 +2001,49 @@ Context *network_driver_create_port(GlobalContext *global, term opts)
 
 REGISTER_PORT_DRIVER(network, network_driver_init, NULL, network_driver_create_port)
 
+//
+// Nif implementation
+//
+
+#define POWER_SAVE_MODE_INVALID -1
+
+static const AtomStringIntPair power_save_mode_table[] = {
+    { ATOM_STR("\x4", "none"), WIFI_PS_NONE },
+    { ATOM_STR("\x9", "min_modem"), WIFI_PS_MIN_MODEM },
+    { ATOM_STR("\x9", "max_modem"), WIFI_PS_MAX_MODEM },
+    SELECT_INT_DEFAULT(POWER_SAVE_MODE_INVALID)
+};
+
+static term nif_network_set_power_save(Context *ctx, int argc, term argv[])
+{
+    UNUSED(argc);
+
+    term mode_term = argv[0];
+    VALIDATE_VALUE(mode_term, term_is_atom);
+    int mode = interop_atom_term_select_int(power_save_mode_table, mode_term, ctx->global);
+    if (UNLIKELY(mode == POWER_SAVE_MODE_INVALID)) {
+        RAISE_ERROR(BADARG_ATOM);
+    }
+
+    return (esp_wifi_set_ps((wifi_ps_type_t) mode) == ESP_OK) ? OK_ATOM : ERROR_ATOM;
+}
+
+static const struct Nif network_set_power_save_nif =
+{
+    .base.type = NIFFunctionType,
+    .nif_ptr = nif_network_set_power_save
+};
+
+const struct Nif *network_nif_get_nif(const char *nifname)
+{
+    if (strcmp("network:set_power_save/1", nifname) == 0) {
+        TRACE("Resolved platform nif %s ...\n", nifname);
+        return &network_set_power_save_nif;
+    }
+
+    return NULL;
+}
+
+REGISTER_NIF_COLLECTION(network, NULL, NULL, network_nif_get_nif)
+
 #endif
