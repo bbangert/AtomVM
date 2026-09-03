@@ -1,0 +1,44 @@
+name: badge image
+
+on:
+  push:
+    branches: [badge]
+    tags: ["badge-v*"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: espressif/idf:v5.5.5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Build
+        shell: bash
+        run: |
+          . $IDF_PATH/export.sh
+          cd src/platforms/esp32
+          idf.py set-target esp32s3
+          idf.py build
+
+      - name: Collect artifacts
+        shell: bash
+        run: |
+          mkdir -p out
+          cp src/platforms/esp32/build/atomvm-esp32.bin out/atomvm-esp32s3-badge.bin
+          cp src/platforms/esp32/build/bootloader/bootloader.bin out/
+          cp src/platforms/esp32/build/partition_table/partition-table.bin out/
+          sha256sum out/* | tee out/SHA256SUMS
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: badge-image
+          path: out/
+
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/badge-v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: out/*
