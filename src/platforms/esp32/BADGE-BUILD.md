@@ -1,45 +1,27 @@
 # Reproducing the badge VM build
 
-`src/platforms/esp32/CMakeLists.txt` now defaults `-DAVM_USE_LIBSODIUM=ON`,
-`-DATOMVM_ELIXIR_SUPPORT=on`, and (when the `atomvm_websocket_client` repo is
-checked out as a sibling of this `AtomVM` checkout, i.e.
-`../atomvm_websocket_client` from the AtomVM checkout root)
-`-DEXTRA_COMPONENT_DIRS` for this fork, so a bare `idf.py build` already
+`src/platforms/esp32/CMakeLists.txt` defaults `-DAVM_USE_LIBSODIUM=ON` and
+`-DATOMVM_ELIXIR_SUPPORT=on` for this fork, so a bare `idf.py build` already
 produces `atomvm-esp32.bin` built against `partitions-elixir.csv` with
-libsodium and the WebSocket transport linked in. Passing any of these flags
-explicitly still overrides the default. The one remaining manual step is
-below.
+libsodium linked in. Passing either flag explicitly still overrides the
+default. The AtomGL and WebSocket components are git submodules under
+`src/platforms/esp32/components/`; ESP-IDF discovers them there with no
+extra configuration.
 
-## Prerequisite: patch the WebSocket component checkout
+## Building
 
-`atomvm_websocket_client/CMakeLists.txt` declares `INCLUDE_DIRS "ports/include"`,
-but the repo ships no such directory, and `idf_component_register` requires
-declared include dirs to physically exist. Before configuring:
+    git clone --recurse-submodules https://github.com/protolux-electronics/AtomVM.git
+    cd AtomVM/src/platforms/esp32
+    . $IDF_PATH/export.sh
+    idf.py set-target esp32s3
+    idf.py build
 
-```
-mkdir -p <path to atomvm_websocket_client checkout>/ports/include
-```
+An existing clone needs `git submodule update --init --recursive` once.
 
-The component's one `.c` file has no local `#include "..."`, so the empty
-directory is enough to satisfy the check. Git does not track empty
-directories, so this step does not survive in that repo and must be repeated
-on every fresh clone. Do not commit anything into that third-party repo to
-work around it.
+Requires ESP-IDF v5.5.5. The AtomGL submodule carries the ST7789 rotation-3
+fix; without it the panel is silently black, with no error anywhere in Elixir.
 
-## set-target
-
-```
-cd src/platforms/esp32
-. $IDF_PATH/export.sh
-idf.py set-target esp32s3
-idf.py build
-```
-
-No `-D` flags are needed if `atomvm_websocket_client` is checked out as a
-sibling of this `AtomVM` checkout (see above); the defaults in
-`CMakeLists.txt` cover all three. If it is not a sibling, or you want a
-different checkout, pass `-DEXTRA_COMPONENT_DIRS=<path>` explicitly. If you
-need to build *without* Elixir support or libsodium (e.g. reproducing
+If you need to build *without* Elixir support or libsodium (e.g. reproducing
 upstream), pass `-DATOMVM_ELIXIR_SUPPORT=off` / `-DAVM_USE_LIBSODIUM=OFF`
 explicitly -- an explicit `-D` always overrides the badge-fork default.
 
@@ -51,10 +33,9 @@ revision to do this for you.
 
 Use `set-target`, not `reconfigure`, any time you change `-D` flags away from
 the defaults: CMake caches its component list, so a plain `idf.py build`
-after adding `-DEXTRA_COMPONENT_DIRS` or `-DAVM_USE_LIBSODIUM=ON` to an
-existing build directory reports success without ever compiling the new
-component in. `set-target` clears the build directory and the generated
-`sdkconfig` first.
+after adding `-DAVM_USE_LIBSODIUM=ON` to an existing build directory reports
+success without ever compiling the new component in. `set-target` clears the
+build directory and the generated `sdkconfig` first.
 
 ## sdkconfig.defaults is generated
 

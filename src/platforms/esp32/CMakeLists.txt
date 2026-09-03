@@ -28,13 +28,6 @@ endif()
 if (NOT DEFINED AVM_USE_LIBSODIUM)
     set(AVM_USE_LIBSODIUM ON CACHE BOOL "Badge fork default: use libsodium" FORCE)
 endif()
-if (NOT DEFINED EXTRA_COMPONENT_DIRS)
-    get_filename_component(_badge_websocket_dir "${CMAKE_CURRENT_SOURCE_DIR}/../../../../atomvm_websocket_client" ABSOLUTE)
-    if (EXISTS "${_badge_websocket_dir}")
-        set(EXTRA_COMPONENT_DIRS "${_badge_websocket_dir}")
-    endif()
-    unset(_badge_websocket_dir)
-endif()
 
 # Don't try to link when testing availability of functions
 set(CMAKE_TRY_COMPILE_TARGET_TYPE "STATIC_LIBRARY")
