@@ -1,8 +1,8 @@
 [submodule "src/platforms/esp32/components/atomgl"]
 	path = src/platforms/esp32/components/atomgl
 	url = https://github.com/protolux-electronics/atomgl.git
-	branch = badge
+	branch = main
 [submodule "src/platforms/esp32/components/atomvm_websocket_client"]
 	path = src/platforms/esp32/components/atomvm_websocket_client
 	url = https://github.com/protolux-electronics/atomvm_websocket_client.git
-	branch = badge
+	branch = main

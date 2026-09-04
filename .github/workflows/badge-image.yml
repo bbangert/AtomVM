@@ -2,7 +2,7 @@ name: badge image
 
 on:
   push:
-    branches: [badge]
+    branches: [main, badge]
     tags: ["badge-v*"]
   workflow_dispatch:
 
@@ -10,7 +10,7 @@ permissions:
   contents: write
 
 jobs:
-  build:
+  vm:
     runs-on: ubuntu-latest
     container: espressif/idf:v5.5.5
     steps:
@@ -33,6 +33,60 @@ jobs:
           cp src/platforms/esp32/build/atomvm-esp32.bin out/atomvm-esp32s3-badge.bin
           cp src/platforms/esp32/build/bootloader/bootloader.bin out/
           cp src/platforms/esp32/build/partition_table/partition-table.bin out/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vm
+          path: out/
+
+  # The esp32 build emits no .avm at all, so the standard libraries the VM
+  # starts from come from a separate host build.
+  boot:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: "28"
+          elixir-version: "1.19"
+          rebar3-version: "3.25.1"
+          hexpm-mirrors: |
+            https://builds.hex.pm
+            https://repo.hex.pm
+
+      - name: Install deps
+        run: |
+          sudo apt update -y
+          sudo apt install -y build-essential cmake gperf zlib1g-dev libmbedtls-dev
+
+      - name: Build boot.avm
+        run: |
+          cmake -B build .
+          make -C build elixir_esp32boot
+          mkdir -p out
+          cp build/libs/esp32boot/elixir_esp32boot.avm out/boot.avm
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: boot
+          path: out/
+
+  release:
+    needs: [vm, boot]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: art
+
+      - name: Collect artifacts
+        shell: bash
+        run: |
+          mkdir -p out
+          cp art/vm/* art/boot/* out/
           sha256sum out/* | tee out/SHA256SUMS
 
       - uses: actions/upload-artifact@v4
