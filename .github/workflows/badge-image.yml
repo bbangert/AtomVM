@@ -2,7 +2,7 @@ name: badge image
 
 on:
   push:
-    branches: [main, badge]
+    branches: [main]
     tags: ["badge-v*"]
   workflow_dispatch:
 
