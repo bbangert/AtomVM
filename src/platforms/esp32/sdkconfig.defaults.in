@@ -52,9 +52,9 @@ CONFIG_COMPILER_OPTIMIZATION_SIZE=y
 # the chain P-256 (see avm_badge_server/priv/cert).
 CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
 
-# LVGL spike: widget memory through malloc, so blocks over the internal
-# threshold land in PSRAM rather than a static pool in internal RAM.
-CONFIG_LV_USE_CLIB_MALLOC=y
+# LVGL spike: every LVGL allocation goes to PSRAM (atomvm_lvgl's
+# lv_mem_psram.c); internal RAM is kept for DMA, stacks, wifi and TLS.
+CONFIG_LV_USE_CUSTOM_MALLOC=y
 CONFIG_LV_FONT_MONTSERRAT_28=y
 
 # LVGL spike: only what the badge draws with; everything else off to fit the factory partition.

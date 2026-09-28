@@ -73,6 +73,7 @@ static const char *const mirror_x_atom = ATOM_STR("\x8", "mirror_x");
 static const char *const mirror_y_atom = ATOM_STR("\x8", "mirror_y");
 static const char *const invert_atom = ATOM_STR("\x6", "invert");
 static const char *const bgr_atom = ATOM_STR("\x3", "bgr");
+static const char *const no_display_atom = ATOM_STR("\xA", "no_display");
 
 enum lvgl_cmd
 {
@@ -115,6 +116,8 @@ static QueueHandle_t queue;
 static lv_display_t *display;
 static lv_obj_t *objs[MAX_OBJS];
 static volatile uint32_t refreshes;
+static volatile uint32_t failed_flushes;
+static esp_lcd_panel_handle_t panel_handle;
 static bool started;
 
 static int get_int_default(term kv, AtomString key, int default_value, GlobalContext *global)
@@ -243,6 +246,23 @@ static void drain(lv_timer_t *timer)
     }
 }
 
+/*
+ * Replaces esp_lvgl_port's flush. A transfer that cannot be queued never
+ * raises the done callback, and LVGL would wait on it forever with its task
+ * spinning; so a failed strip is dropped and LVGL told it is finished.
+ */
+static void flush(lv_display_t *disp, const lv_area_t *area, uint8_t *pixels)
+{
+    lv_draw_sw_rgb565_swap(pixels, lv_area_get_size(area));
+
+    esp_err_t err = esp_lcd_panel_draw_bitmap(
+        panel_handle, area->x1, area->y1, area->x2 + 1, area->y2 + 1, pixels);
+    if (err != ESP_OK) {
+        failed_flushes++;
+        lv_display_flush_ready(disp);
+    }
+}
+
 static void count_refresh(lv_event_t *event)
 {
     UNUSED(event);
@@ -254,8 +274,10 @@ static void report(lv_timer_t *timer)
     UNUSED(timer);
     static uint32_t last;
     uint32_t now = refreshes;
-    ESP_LOGI(TAG, "stats: %lu refreshes/5s internal_free=%u dma_free=%u internal_largest=%u psram_free=%u",
-        (unsigned long) (now - last), heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+    ESP_LOGI(TAG,
+        "stats: %lu refreshes/5s failed_flushes=%lu internal_free=%u dma_free=%u internal_largest=%u psram_free=%u",
+        (unsigned long) (now - last), (unsigned long) failed_flushes,
+        heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
         heap_caps_get_free_size(MALLOC_CAP_DMA),
         heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
         heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
@@ -311,7 +333,7 @@ static term enqueue(term req, int kind)
             break;
     }
 
-    if (xQueueSend(queue, &cmd, 0) != pdTRUE) {
+    if (queue == NULL || xQueueSend(queue, &cmd, 0) != pdTRUE) {
         free(cmd.text);
         return ERROR_ATOM;
     }
@@ -395,6 +417,7 @@ static bool start_display(term opts, GlobalContext *global)
         ESP_LOGE(TAG, "esp_lcd_new_panel_st7789: %s", esp_err_to_name(err));
         return false;
     }
+    panel_handle = panel;
     esp_lcd_panel_reset(panel);
     esp_lcd_panel_init(panel);
     esp_lcd_panel_invert_color(panel, get_bool_default(opts, invert_atom, true, global));
@@ -437,6 +460,7 @@ static bool start_display(term opts, GlobalContext *global)
     queue = xQueueCreate(QUEUE_DEPTH, sizeof(struct command));
 
     lvgl_port_lock(0);
+    lv_display_set_flush_cb(display, flush);
     lv_obj_set_style_bg_color(lv_screen_active(), lv_color_hex(0x16122A), 0);
     lv_display_add_event_cb(display, count_refresh, LV_EVENT_REFR_READY, NULL);
     lv_timer_create(drain, 10, NULL);
@@ -459,10 +483,14 @@ Context *atomvm_lvgl_create_port(GlobalContext *global, term opts)
         ESP_LOGE(TAG, "Only one LVGL display is supported");
         return NULL;
     }
-    if (!start_display(opts, global)) {
+    /* Spike: serve only `stats`, to measure memory without LVGL running. */
+    if (get_bool_default(opts, no_display_atom, false, global)) {
+        ESP_LOGI(TAG, "no_display: stats only");
+    } else if (!start_display(opts, global)) {
         return NULL;
+    } else {
+        started = true;
     }
-    started = true;
 
     Context *ctx = context_new(global);
     ctx->native_handler = consume_mailbox;
