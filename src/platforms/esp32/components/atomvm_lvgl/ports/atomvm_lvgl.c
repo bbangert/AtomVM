@@ -60,7 +60,7 @@
 #define LCD_HOST SPI2_HOST
 #define MAX_OBJS 32
 #define QUEUE_DEPTH 64
-#define DRAW_ROWS 12
+#define DRAW_ROWS 24
 
 static const char *const sclk_atom = ATOM_STR("\x4", "sclk");
 static const char *const mosi_atom = ATOM_STR("\x4", "mosi");
