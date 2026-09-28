@@ -26,6 +26,8 @@
 #include <driver/gpio.h>
 #include <driver/spi_master.h>
 #include <esp_heap_caps.h>
+#include <esp_heap_trace.h>
+#include <esp_memory_utils.h>
 #include <esp_lcd_panel_io.h>
 #include <esp_lcd_panel_ops.h>
 #include <esp_lcd_panel_vendor.h>
@@ -84,7 +86,9 @@ enum lvgl_cmd
     LvglBgCmd,
     LvglClearCmd,
     LvglBenchCmd,
-    LvglStatsCmd
+    LvglStatsCmd,
+    LvglTraceStartCmd,
+    LvglTraceDumpCmd
 };
 
 static const AtomStringIntPair cmd_table[] = {
@@ -95,6 +99,8 @@ static const AtomStringIntPair cmd_table[] = {
     { ATOM_STR("\x5", "clear"), LvglClearCmd },
     { ATOM_STR("\x5", "bench"), LvglBenchCmd },
     { ATOM_STR("\x5", "stats"), LvglStatsCmd },
+    { ATOM_STR("\xB", "trace_start"), LvglTraceStartCmd },
+    { ATOM_STR("\xA", "trace_dump"), LvglTraceDumpCmd },
     SELECT_INT_DEFAULT(LvglInvalidCmd)
 };
 
@@ -296,6 +302,91 @@ static term stats_term(Context *ctx)
     return tuple;
 }
 
+/*
+ * SPIKE diagnostics: heap tracing in leaks mode. What is still recorded at the
+ * dump was allocated after the start and never freed; only internal RAM is
+ * reported, grouped by the allocating call chain.
+ */
+#ifdef CONFIG_HEAP_TRACING_STANDALONE
+#define TRACE_RECORDS 3000
+#define TRACE_GROUPS 48
+
+static heap_trace_record_t *trace_records;
+
+struct trace_group
+{
+    void *callers[CONFIG_HEAP_TRACING_STACK_DEPTH];
+    size_t bytes;
+    int count;
+};
+
+static void trace_start(void)
+{
+    if (trace_records == NULL) {
+        trace_records = heap_caps_calloc(TRACE_RECORDS, sizeof(heap_trace_record_t), MALLOC_CAP_SPIRAM);
+        ESP_ERROR_CHECK(heap_trace_init_standalone(trace_records, TRACE_RECORDS));
+    }
+    ESP_ERROR_CHECK(heap_trace_start(HEAP_TRACE_LEAKS));
+    ESP_LOGI(TAG, "trace: started, internal_free=%u", heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+}
+
+static void trace_dump(void)
+{
+    heap_trace_stop();
+    size_t count = heap_trace_get_count();
+    struct trace_group *groups = heap_caps_calloc(TRACE_GROUPS, sizeof(struct trace_group), MALLOC_CAP_SPIRAM);
+    int used = 0;
+    size_t internal_bytes = 0;
+    int internal_count = 0;
+
+    for (size_t i = 0; i < count; i++) {
+        heap_trace_record_t rec;
+        if (heap_trace_get(i, &rec) != ESP_OK || !esp_ptr_internal(rec.address)) {
+            continue;
+        }
+        internal_bytes += rec.size;
+        internal_count++;
+
+        int g = 0;
+        while (g < used
+            && memcmp(groups[g].callers, rec.alloced_by, sizeof(groups[g].callers)) != 0) {
+            g++;
+        }
+        if (g == used) {
+            if (used == TRACE_GROUPS) {
+                continue;
+            }
+            memcpy(groups[g].callers, rec.alloced_by, sizeof(groups[g].callers));
+            used++;
+        }
+        groups[g].bytes += rec.size;
+        groups[g].count++;
+    }
+
+    ESP_LOGI(TAG, "trace: %u records, %d internal still allocated, %u bytes, %d call chains, internal_free=%u",
+        (unsigned) count, internal_count, (unsigned) internal_bytes, used,
+        heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+
+    for (int g = 0; g < used; g++) {
+        printf("TRACE bytes=%u count=%d callers=", (unsigned) groups[g].bytes, groups[g].count);
+        for (int d = 0; d < CONFIG_HEAP_TRACING_STACK_DEPTH; d++) {
+            printf("0x%08x ", (unsigned) (uintptr_t) groups[g].callers[d]);
+        }
+        printf("\n");
+    }
+    heap_caps_free(groups);
+}
+#else
+static void trace_start(void)
+{
+    ESP_LOGW(TAG, "trace: needs CONFIG_HEAP_TRACING_STANDALONE");
+}
+
+static void trace_dump(void)
+{
+}
+#endif
+
 /* VM scheduler thread: parse and queue, never call LVGL. */
 static term enqueue(term req, int kind)
 {
@@ -356,7 +447,15 @@ static NativeHandlerResult consume_mailbox(Context *ctx)
     term cmd_term = term_is_tuple(req) ? term_get_tuple_element(req, 0) : req;
     int kind = interop_atom_term_select_int(cmd_table, cmd_term, global);
 
-    if (kind == LvglStatsCmd) {
+    if (kind == LvglTraceStartCmd || kind == LvglTraceDumpCmd) {
+        if (kind == LvglTraceStartCmd) {
+            trace_start();
+        } else {
+            trace_dump();
+        }
+        port_ensure_available(ctx, PORT_REPLY_SIZE);
+        port_send_reply(ctx, gen_message.pid, gen_message.ref, OK_ATOM);
+    } else if (kind == LvglStatsCmd) {
         port_ensure_available(ctx, PORT_REPLY_SIZE + TUPLE_SIZE(5));
         port_send_reply(ctx, gen_message.pid, gen_message.ref, stats_term(ctx));
     } else {
