@@ -1,0 +1,7 @@
+menu "ATOMVM_LVGL Configuration"
+
+config AVM_LVGL_ENABLE
+	bool "Enable AtomVM LVGL display driver (spike)"
+	default y
+
+endmenu
