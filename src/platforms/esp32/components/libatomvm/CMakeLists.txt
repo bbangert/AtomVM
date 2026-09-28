@@ -66,6 +66,13 @@ endif()
 
 target_compile_features(${COMPONENT_LIB} INTERFACE c_std_11)
 
+# The VM's own allocations go to PSRAM whatever their size; see avm_psram_alloc.h.
+if (CONFIG_SPIRAM)
+    target_link_libraries(libAtomVM PRIVATE idf::heap)
+    target_compile_options(libAtomVM PRIVATE
+        "SHELL:-include ${CMAKE_CURRENT_SOURCE_DIR}/avm_psram_alloc.h")
+endif()
+
 if (AVM_USE_LIBSODIUM)
     # ESP-IDF always ships mbedTLS with PSA Crypto support, so no compile check
     # is needed here (unlike generic_unix where the system mbedTLS may vary).
