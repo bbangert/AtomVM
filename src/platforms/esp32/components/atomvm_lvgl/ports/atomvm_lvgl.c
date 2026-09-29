@@ -7,9 +7,10 @@
  * are also their z-order (0 at the bottom), and changes them in batches:
  *
  *   {batch, [Op]} -> ok | busy        applied atomically, in order
- *     {new, Id, box | label | image}  created at z-index Id
+ *     {new, Id, box | label | marquee | image}  created at z-index Id; a marquee
+ *                                      is a label that scrolls round when wider than w
  *     {del, Id}
- *     {set, Id, [{Prop, Value}]}      x y w h bg fg text font src sx sy ox oy hidden recolor
+ *     {set, Id, [{Prop, Value}]}      x y w h bg fg text font src sx sy ox oy hidden recolor speed
  *     {img, ImgId, rgba8888 | a8, W, H, Bin}
  *     {unimg, ImgId}
  *     {font, FontId, uf | raw8x16, Bin}  loaded once; a second load of an id is ignored
@@ -134,13 +135,15 @@ enum obj_type
     TypeNone = 0,
     TypeBox,
     TypeLabel,
-    TypeImage
+    TypeImage,
+    TypeMarquee
 };
 
 static const AtomStringIntPair type_table[] = {
     { ATOM_STR("\x3", "box"), TypeBox },
     { ATOM_STR("\x5", "label"), TypeLabel },
     { ATOM_STR("\x5", "image"), TypeImage },
+    { ATOM_STR("\x7", "marquee"), TypeMarquee },
     SELECT_INT_DEFAULT(TypeNone)
 };
 
@@ -161,7 +164,8 @@ enum prop
     PropOffsetX,
     PropOffsetY,
     PropHidden,
-    PropRecolor
+    PropRecolor,
+    PropSpeed
 };
 
 static const AtomStringIntPair prop_table[] = {
@@ -180,6 +184,7 @@ static const AtomStringIntPair prop_table[] = {
     { ATOM_STR("\x2", "oy"), PropOffsetY },
     { ATOM_STR("\x6", "hidden"), PropHidden },
     { ATOM_STR("\x7", "recolor"), PropRecolor },
+    { ATOM_STR("\x5", "speed"), PropSpeed },
     SELECT_INT_DEFAULT(PropInvalid)
 };
 
@@ -542,6 +547,11 @@ static void create_obj(int id, int type)
             plain(obj);
             lv_label_set_long_mode(obj, LV_LABEL_LONG_MODE_CLIP);
             break;
+        case TypeMarquee:
+            obj = lv_label_create(screen);
+            plain(obj);
+            lv_label_set_long_mode(obj, LV_LABEL_LONG_MODE_SCROLL_CIRCULAR);
+            break;
         case TypeImage:
             obj = lv_image_create(screen);
             plain(obj);
@@ -598,7 +608,7 @@ static void set_prop(int id, struct prop_value *p)
             lv_obj_set_style_text_color(obj, lv_color_hex((uint32_t) v), 0);
             break;
         case PropText:
-            if (type == TypeLabel) {
+            if (type == TypeLabel || type == TypeMarquee) {
                 lv_label_set_text(obj, p->text != NULL ? p->text : "");
             }
             break;
@@ -634,6 +644,10 @@ static void set_prop(int id, struct prop_value *p)
                 lv_obj_set_style_image_recolor(obj, lv_color_hex((uint32_t) v), 0);
                 lv_obj_set_style_image_recolor_opa(obj, LV_OPA_COVER, 0);
             }
+            break;
+        case PropSpeed:
+            /* Pixels a second, however long the text. */
+            lv_obj_set_style_anim_duration(obj, lv_anim_speed(v > 0 ? v : 40), 0);
             break;
         default:
             break;
