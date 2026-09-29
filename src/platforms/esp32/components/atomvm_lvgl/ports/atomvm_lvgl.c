@@ -716,11 +716,17 @@ static void drain(lv_timer_t *timer)
 {
     UNUSED(timer);
     struct batch *b;
+    bool applied = false;
     while (xQueueReceive(queue, &b, 0) == pdTRUE) {
         for (size_t i = 0; i < b->count; i++) {
             apply_op(&b->ops[i]);
         }
         free_batch(b);
+        applied = true;
+    }
+    /* Drawn now rather than on the next refresh period, so a key press shows at once. */
+    if (applied) {
+        lv_refr_now(display);
     }
 }
 
