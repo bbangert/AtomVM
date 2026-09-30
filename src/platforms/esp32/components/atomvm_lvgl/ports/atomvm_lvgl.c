@@ -50,6 +50,7 @@
 #include <string.h>
 
 #include <driver/gpio.h>
+#include <esp_attr.h>
 #include <driver/spi_master.h>
 #include <esp_heap_caps.h>
 #include <esp_heap_trace.h>
@@ -307,9 +308,9 @@ struct font_data
 
 static QueueHandle_t queue;
 static lv_display_t *display;
-static lv_obj_t *objs[MAX_OBJS];
-static uint8_t obj_types[MAX_OBJS];
-static lv_image_dsc_t *images[MAX_IMAGES];
+EXT_RAM_BSS_ATTR static lv_obj_t *objs[MAX_OBJS];
+EXT_RAM_BSS_ATTR static uint8_t obj_types[MAX_OBJS];
+EXT_RAM_BSS_ATTR static lv_image_dsc_t *images[MAX_IMAGES];
 static struct font_data *fonts[MAX_FONTS];
 static volatile uint32_t refreshes;
 static volatile uint32_t failed_flushes;
@@ -655,8 +656,8 @@ struct fx
     int id;
 };
 
-static struct fx *fxs[MAX_OBJS];
-static struct fx_params fx_params[MAX_OBJS];
+EXT_RAM_BSS_ATTR static struct fx *fxs[MAX_OBJS];
+EXT_RAM_BSS_ATTR static struct fx_params fx_params[MAX_OBJS];
 
 /* Scrambled cells: shades, blocks, box lines and a few symbols in code page
  * 437 for the built-in font, plain ASCII for the others. */
@@ -894,7 +895,7 @@ struct motion_params
     bool touched;
 };
 
-static struct motion_params motions[MAX_OBJS];
+EXT_RAM_BSS_ATTR static struct motion_params motions[MAX_OBJS];
 
 static void move_x(void *obj, int32_t v)
 {
@@ -1013,7 +1014,7 @@ static void set_motion_param(int id, int key, int32_t v)
  * Glide and flipbooks, LVGL task only
  * ------------------------------------------------------------------------- */
 
-static uint16_t glides[MAX_OBJS];
+EXT_RAM_BSS_ATTR static uint16_t glides[MAX_OBJS];
 
 /* A placed object with a glide time animates to a new x or y; a new one is just put there. */
 static void glide_to(int id, lv_anim_exec_xcb_t exec, int32_t from, int32_t to)
@@ -1046,7 +1047,7 @@ struct flipbook
     int id;
 };
 
-static struct flipbook *flips[MAX_OBJS];
+EXT_RAM_BSS_ATTR static struct flipbook *flips[MAX_OBJS];
 
 static void flip_show(struct flipbook *f)
 {

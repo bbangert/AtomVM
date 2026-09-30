@@ -106,3 +106,12 @@ CONFIG_LV_FONT_MONTSERRAT_28=y
 # CONFIG_LV_DRAW_SW_SUPPORT_ARGB8888_PREMULTIPLIED is not set
 # CONFIG_LV_DRAW_SW_SUPPORT_RGB565_SWAPPED is not set
 # CONFIG_LV_DRAW_SW_SUPPORT_RGB565A8 is not set
+
+# Large zeroed tables (the LVGL driver's per-object state) may live in PSRAM.
+CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY=y
+# The badge has no SD card, so the storage NIFs and FAT are left out.
+# CONFIG_AVM_ENABLE_STORAGE_NIFS is not set
+
+# The common CA list covers the chat server and NervesHub at a fraction of the full bundle.
+# CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_FULL is not set
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_CMN=y
