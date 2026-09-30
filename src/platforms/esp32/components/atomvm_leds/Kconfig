@@ -1,0 +1,7 @@
+menu "ATOMVM_LEDS Configuration"
+
+config AVM_LEDS_ENABLE
+	bool "Enable AtomVM LED chain driver"
+	default y
+
+endmenu

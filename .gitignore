@@ -39,3 +39,5 @@ src/platforms/esp32/dependencies.lock
 .clang-tidy
 !src/platforms/esp32/components/atomvm_lvgl/
 !src/platforms/esp32/components/atomvm_lvgl/**
+!src/platforms/esp32/components/atomvm_leds/
+!src/platforms/esp32/components/atomvm_leds/**
