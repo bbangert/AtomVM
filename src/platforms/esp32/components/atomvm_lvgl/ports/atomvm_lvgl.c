@@ -28,6 +28,9 @@
  *     {reset}                          deletes every object and image, keeps fonts
  *     {decor, [Spec]}                  replaces the decorations drawn over everything:
  *       {border, Thickness, PixelsPerSecond, [RGB]}  a frame whose colours travel round
+ *       {chaser, Thickness, PixelsPerSecond, Length, Trail, [RGB]}
+ *                                     a line that runs clockwise round the edge, coloured
+ *                                     head to tail, its last Trail pixels fading out
  *       {beam, RGB, PeriodMs, Height, Opa}           a line that sweeps down now and then
  *       {glitch, [RGB], MinMs, MaxMs}                 bars that flash at random
  *       {line, X, Y, W, H, [RGB], pulse | flow, PeriodMs, MinPercent}
@@ -1301,6 +1304,7 @@ static void set_prop(int id, struct prop_value *p)
 #define DECOR_GLITCH_BARS 3
 #define DECOR_TICK_MS 40
 #define BORDER_SEGMENT 4
+#define CHASER_SEGMENT 2
 #define DECOR_MAX_LINES 4
 
 enum line_mode
@@ -1329,6 +1333,10 @@ struct decor
     uint16_t speed;
     uint8_t border_count;
     uint32_t border_colours[DECOR_MAX_COLOURS];
+
+    bool chaser;
+    uint16_t chase_len;
+    uint16_t chase_trail;
 
     bool beam;
     uint32_t beam_colour;
@@ -1403,6 +1411,43 @@ static int32_t perimeter_pos(int edge, int32_t along)
     }
 }
 
+static uint32_t gradient_at(const uint32_t *colours, int32_t count, int32_t at, int32_t span, bool loop);
+
+/* Only the stretch of edge under the chaser is drawn; the rest stays clear. */
+static void chaser_draw(lv_layer_t *layer, int edge, const lv_area_t *box)
+{
+    lv_draw_rect_dsc_t dsc;
+    lv_draw_rect_dsc_init(&dsc);
+
+    int32_t perimeter = 2 * (panel_w() + panel_h());
+    int32_t len = decor_now.chase_len;
+    int32_t span = len + decor_now.chase_trail;
+    int32_t head = (border_phase % perimeter + perimeter) % perimeter;
+
+    bool across = edge == 0 || edge == 2;
+    int32_t length = across ? lv_area_get_width(box) : lv_area_get_height(box);
+    int32_t offset = across ? box->x1 : box->y1;
+
+    for (int32_t along = 0; along < length; along += CHASER_SEGMENT) {
+        int32_t behind = ((head - perimeter_pos(edge, offset + along)) % perimeter + perimeter) % perimeter;
+        if (behind >= span) {
+            continue;
+        }
+        int32_t opa = behind < len ? 255 : 255 - ((behind - len) * 255) / LV_MAX(decor_now.chase_trail, 1);
+        dsc.bg_opa = (lv_opa_t) opa;
+        dsc.bg_color = lv_color_hex(gradient_at(decor_now.border_colours, decor_now.border_count, behind, span, false));
+        lv_area_t seg = *box;
+        if (across) {
+            seg.x1 = box->x1 + along;
+            seg.x2 = LV_MIN(seg.x1 + CHASER_SEGMENT - 1, box->x2);
+        } else {
+            seg.y1 = box->y1 + along;
+            seg.y2 = LV_MIN(seg.y1 + CHASER_SEGMENT - 1, box->y2);
+        }
+        lv_draw_rect(layer, &dsc, &seg);
+    }
+}
+
 static void border_draw(lv_event_t *e)
 {
     lv_obj_t *obj = lv_event_get_target_obj(e);
@@ -1410,6 +1455,11 @@ static void border_draw(lv_event_t *e)
     int edge = (int) (intptr_t) lv_event_get_user_data(e);
     lv_area_t box;
     lv_obj_get_coords(obj, &box);
+
+    if (decor_now.chaser) {
+        chaser_draw(layer, edge, &box);
+        return;
+    }
 
     lv_draw_rect_dsc_t dsc;
     lv_draw_rect_dsc_init(&dsc);
@@ -1611,7 +1661,7 @@ static void decor_apply(struct decor *d)
         line_objs[i] = obj;
     }
 
-    if (d->border && d->thickness > 0) {
+    if ((d->border || d->chaser) && d->thickness > 0) {
         int32_t t = d->thickness;
         int32_t geometry[4][4] = {
             { 0, 0, w, t }, { w - t, t, t, h - 2 * t }, { 0, h - t, w, t }, { 0, t, t, h - 2 * t }
@@ -1625,7 +1675,7 @@ static void decor_apply(struct decor *d)
         }
     }
 
-    if ((d->border && d->thickness > 0) || d->line_count > 0) {
+    if (((d->border || d->chaser) && d->thickness > 0) || d->line_count > 0) {
         border_timer = lv_timer_create(border_tick, DECOR_TICK_MS, NULL);
     }
 
@@ -1860,6 +1910,7 @@ static bool parse_decor(struct op *op, term specs, GlobalContext *global)
     }
     op->decor = d;
     term border = globalcontext_make_atom(global, ATOM_STR("\x6", "border"));
+    term chaser = globalcontext_make_atom(global, ATOM_STR("\x6", "chaser"));
     term beam = globalcontext_make_atom(global, ATOM_STR("\x4", "beam"));
     term glitch = globalcontext_make_atom(global, ATOM_STR("\x6", "glitch"));
     term line = globalcontext_make_atom(global, ATOM_STR("\x4", "line"));
@@ -1878,6 +1929,13 @@ static bool parse_decor(struct op *op, term specs, GlobalContext *global)
             d->thickness = int_at(spec, 1);
             d->speed = int_at(spec, 2);
             d->border_count = parse_colours(term_get_tuple_element(spec, 3), d->border_colours);
+        } else if (kind == chaser && arity == 6) {
+            d->chaser = true;
+            d->thickness = int_at(spec, 1);
+            d->speed = int_at(spec, 2);
+            d->chase_len = int_at(spec, 3);
+            d->chase_trail = int_at(spec, 4);
+            d->border_count = parse_colours(term_get_tuple_element(spec, 5), d->border_colours);
         } else if (kind == beam && arity == 5) {
             d->beam = true;
             d->beam_colour = (uint32_t) int_at(spec, 1);
