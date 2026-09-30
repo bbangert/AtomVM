@@ -4,9 +4,11 @@
 `-DATOMVM_ELIXIR_SUPPORT=on` for this fork, so a bare `idf.py build` already
 produces `atomvm-esp32.bin` built against `partitions-elixir.csv` with
 libsodium linked in. Passing either flag explicitly still overrides the
-default. The AtomGL and WebSocket components are git submodules under
-`src/platforms/esp32/components/`; ESP-IDF discovers them there with no
-extra configuration.
+default. The WebSocket component is a git submodule under
+`src/platforms/esp32/components/`; ESP-IDF discovers it there with no extra
+configuration. The display driver is `components/atomvm_lvgl`, the `lvgl`
+port driver, which pulls LVGL and `esp_lvgl_port` from the ESP component
+registry at the exact versions its `idf_component.yml` pins.
 
 ## Building
 
@@ -18,8 +20,9 @@ extra configuration.
 
 An existing clone needs `git submodule update --init --recursive` once.
 
-Requires ESP-IDF v5.5.5. The AtomGL submodule carries the ST7789 rotation-3
-fix; without it the panel is silently black, with no error anywhere in Elixir.
+Requires ESP-IDF v5.5.5. Pushing a `badge-v*` tag runs
+`.github/workflows/badge-image.yml`, which builds the VM and `boot.avm` and
+publishes them as a release for `mix badge.base`.
 
 If you need to build *without* Elixir support or libsodium (e.g. reproducing
 upstream), pass `-DATOMVM_ELIXIR_SUPPORT=off` / `-DAVM_USE_LIBSODIUM=OFF`
