@@ -7,14 +7,19 @@
  * are also their z-order (0 at the bottom), and changes them in batches:
  *
  *   {batch, [Op]} -> ok | busy        applied atomically, in order
- *     {new, Id, box | label | marquee | image}  created at z-index Id; a marquee
- *                                      is a label that scrolls round when wider than w
+ *     {new, Id, box | label | marquee | image | flipbook}  created at z-index Id; a
+ *                                      marquee is a label that scrolls round when wider than
+ *                                      w, a flipbook an image that cycles through `frames`
  *     {del, Id}
  *     {set, Id, [{Prop, Value}]}      x y w h bg fg text font src sx sy ox oy hidden recolor speed
  *                                      fx fx_dir fx_steps fx_ms fx_row fx_left fx_noise:
  *                                      a label plays a text effect on its own text, see below
  *                                      mx my mdir mdelay mms mease: the object glides in from
  *                                      (x + mx, y + my), or out to there and hides, see below
+ *                                      glide: once placed, a new x or y is animated to over
+ *                                      that many ms rather than jumped to
+ *                                      frames (binary of 16-bit little-endian image ids),
+ *                                      frame_ms: a flipbook's pictures and how long each shows
  *     {img, ImgId, rgba8888 | a8, W, H, Bin[, Scale]}
  *                                      Scale enlarges it once, nearest neighbour; a fully
  *                                      opaque RGBA image is kept as RGB565, drawn unblended
@@ -150,7 +155,8 @@ enum obj_type
     TypeBox,
     TypeLabel,
     TypeImage,
-    TypeMarquee
+    TypeMarquee,
+    TypeFlipbook
 };
 
 static const AtomStringIntPair type_table[] = {
@@ -158,6 +164,7 @@ static const AtomStringIntPair type_table[] = {
     { ATOM_STR("\x5", "label"), TypeLabel },
     { ATOM_STR("\x5", "image"), TypeImage },
     { ATOM_STR("\x7", "marquee"), TypeMarquee },
+    { ATOM_STR("\x8", "flipbook"), TypeFlipbook },
     SELECT_INT_DEFAULT(TypeNone)
 };
 
@@ -192,7 +199,10 @@ enum prop
     PropMoveDir,
     PropMoveDelay,
     PropMoveMs,
-    PropMoveEase
+    PropMoveEase,
+    PropGlide,
+    PropFrames,
+    PropFrameMs
 };
 
 static const AtomStringIntPair prop_table[] = {
@@ -225,6 +235,9 @@ static const AtomStringIntPair prop_table[] = {
     { ATOM_STR("\x6", "mdelay"), PropMoveDelay },
     { ATOM_STR("\x3", "mms"), PropMoveMs },
     { ATOM_STR("\x5", "mease"), PropMoveEase },
+    { ATOM_STR("\x5", "glide"), PropGlide },
+    { ATOM_STR("\x6", "frames"), PropFrames },
+    { ATOM_STR("\x8", "frame_ms"), PropFrameMs },
     SELECT_INT_DEFAULT(PropInvalid)
 };
 
@@ -993,10 +1006,107 @@ static void set_motion_param(int id, int key, int32_t v)
     m->touched = true;
 }
 
+/* ---------------------------------------------------------------------------
+ * Glide and flipbooks, LVGL task only
+ * ------------------------------------------------------------------------- */
+
+static uint16_t glides[MAX_OBJS];
+
+/* A placed object with a glide time animates to a new x or y; a new one is just put there. */
+static void glide_to(int id, lv_anim_exec_xcb_t exec, int32_t from, int32_t to)
+{
+    lv_anim_delete(objs[id], exec);
+    if (glides[id] == 0 || from == to) {
+        exec(objs[id], to);
+        return;
+    }
+    lv_anim_t a;
+    lv_anim_init(&a);
+    lv_anim_set_var(&a, objs[id]);
+    lv_anim_set_exec_cb(&a, exec);
+    lv_anim_set_values(&a, from, to);
+    lv_anim_set_duration(&a, glides[id]);
+    lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
+    lv_anim_start(&a);
+}
+
+#define FLIP_MAX_FRAMES 32
+
+struct flipbook
+{
+    uint16_t ids[FLIP_MAX_FRAMES];
+    uint8_t count;
+    uint8_t index;
+    uint16_t ms;
+    bool touched;
+    lv_timer_t *timer;
+    int id;
+};
+
+static struct flipbook *flips[MAX_OBJS];
+
+static void flip_show(struct flipbook *f)
+{
+    uint16_t img = f->ids[f->index];
+    if (img < MAX_IMAGES && images[img] != NULL) {
+        lv_image_set_src(objs[f->id], images[img]);
+    }
+}
+
+static void flip_tick(lv_timer_t *timer)
+{
+    struct flipbook *f = lv_timer_get_user_data(timer);
+    f->index = (f->index + 1) % f->count;
+    flip_show(f);
+}
+
+static void flip_stop(int id)
+{
+    struct flipbook *f = flips[id];
+    if (f == NULL) {
+        return;
+    }
+    if (f->timer != NULL) {
+        lv_timer_delete(f->timer);
+    }
+    heap_caps_free(f);
+    flips[id] = NULL;
+}
+
+static struct flipbook *flip_for(int id)
+{
+    if (flips[id] == NULL) {
+        flips[id] = heap_caps_calloc(1, sizeof(struct flipbook), PSRAM_CAPS);
+        flips[id]->id = id;
+    }
+    return flips[id];
+}
+
+/* Restarts from the first frame whenever its frames or pace change. */
+static void flip_start(int id)
+{
+    struct flipbook *f = flips[id];
+    f->touched = false;
+    if (f->timer != NULL) {
+        lv_timer_delete(f->timer);
+        f->timer = NULL;
+    }
+    f->index = 0;
+    if (f->count == 0) {
+        return;
+    }
+    flip_show(f);
+    if (f->count > 1) {
+        f->timer = lv_timer_create(flip_tick, f->ms > 0 ? f->ms : 200, f);
+    }
+}
+
 static void delete_obj(int id)
 {
     if (id >= 0 && id < MAX_OBJS) {
         memset(&motions[id], 0, sizeof(struct motion_params));
+        glides[id] = 0;
+        flip_stop(id);
     }
     fx_stop(id);
     if (id >= 0 && id < MAX_OBJS) {
@@ -1037,6 +1147,7 @@ static void create_obj(int id, int type)
             lv_label_set_long_mode(obj, LV_LABEL_LONG_MODE_SCROLL_CIRCULAR);
             break;
         case TypeImage:
+        case TypeFlipbook:
             obj = lv_image_create(screen);
             plain(obj);
             lv_image_set_inner_align(obj, LV_IMAGE_ALIGN_TOP_LEFT);
@@ -1068,10 +1179,29 @@ static void set_prop(int id, struct prop_value *p)
 
     switch (p->key) {
         case PropX:
-            lv_obj_set_x(obj, v);
+            glide_to(id, move_x, lv_obj_get_x_aligned(obj), v);
             break;
         case PropY:
-            lv_obj_set_y(obj, v);
+            glide_to(id, move_y, lv_obj_get_y_aligned(obj), v);
+            break;
+        case PropGlide:
+            glides[id] = v > 0 ? v : 0;
+            break;
+        case PropFrames:
+            if (type == TypeFlipbook) {
+                struct flipbook *f = flip_for(id);
+                f->count = 0;
+                for (int32_t i = 0; i + 1 < v && f->count < FLIP_MAX_FRAMES; i += 2) {
+                    f->ids[f->count++] = (uint8_t) p->text[i] | ((uint8_t) p->text[i + 1] << 8);
+                }
+                f->touched = true;
+            }
+            break;
+        case PropFrameMs:
+            if (type == TypeFlipbook) {
+                flip_for(id)->ms = v;
+                flip_for(id)->touched = true;
+            }
             break;
         case PropW:
             lv_obj_set_width(obj, v);
@@ -1105,7 +1235,8 @@ static void set_prop(int id, struct prop_value *p)
             }
             break;
         case PropSrc:
-            if (type == TypeImage && v >= 0 && v < MAX_IMAGES && images[v] != NULL) {
+            if ((type == TypeImage || type == TypeFlipbook) && v >= 0 && v < MAX_IMAGES
+                && images[v] != NULL) {
                 lv_image_set_src(obj, images[v]);
             }
             break;
@@ -1561,6 +1692,9 @@ static void apply_op(struct op *op)
                     motions[op->id].touched = false;
                     motion_start(op->id);
                 }
+                if (flips[op->id] != NULL && flips[op->id]->touched) {
+                    flip_start(op->id);
+                }
             } else {
                 dropped_ops++;
             }
@@ -1692,6 +1826,10 @@ static bool parse_props(struct op *op, term list, GlobalContext *global)
         term value = term_get_tuple_element(pair, 1);
         if (p->key == PropText) {
             p->text = copy_text(value);
+        } else if (p->key == PropFrames && term_is_binary(value)) {
+            size_t size;
+            p->text = (char *) copy_binary(value, &size);
+            p->value = (int32_t) size;
         } else if (term_is_integer(value)) {
             p->value = term_to_int(value);
         } else {
