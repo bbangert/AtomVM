@@ -21,6 +21,8 @@
  *       {border, Thickness, PixelsPerSecond, [RGB]}  a frame whose colours travel round
  *       {beam, RGB, PeriodMs, Height, Opa}           a line that sweeps down now and then
  *       {glitch, [RGB], MinMs, MaxMs}                 bars that flash at random
+ *       {line, X, Y, W, H, [RGB], pulse | flow, PeriodMs, MinPercent}
+ *                                     a gradient line that breathes, or slides along
  *   stats -> {InternalFree, DmaFree, InternalLargest, PsramFree, Refreshes}
  *
  * The mailbox handler runs on a VM scheduler thread and never calls LVGL: it
@@ -969,6 +971,26 @@ static void set_prop(int id, struct prop_value *p)
 #define DECOR_GLITCH_BARS 3
 #define DECOR_TICK_MS 40
 #define BORDER_SEGMENT 4
+#define DECOR_MAX_LINES 4
+
+enum line_mode
+{
+    LinePulse = 0,
+    LineFlow
+};
+
+struct decor_line
+{
+    int16_t x;
+    int16_t y;
+    int16_t w;
+    int16_t h;
+    uint8_t mode;
+    uint8_t min_pct;
+    uint16_t period;
+    uint8_t count;
+    uint32_t colours[DECOR_MAX_COLOURS];
+};
 
 struct decor
 {
@@ -989,10 +1011,14 @@ struct decor
     uint32_t glitch_colours[DECOR_MAX_COLOURS];
     uint16_t glitch_min;
     uint16_t glitch_max;
+
+    uint8_t line_count;
+    struct decor_line lines[DECOR_MAX_LINES];
 };
 
 static struct decor decor_now;
 static lv_obj_t *border_edges[4];
+static lv_obj_t *line_objs[DECOR_MAX_LINES];
 static lv_obj_t *beam_obj;
 static lv_obj_t *glitch_bars[DECOR_GLITCH_BARS];
 static lv_timer_t *border_timer;
@@ -1077,12 +1103,90 @@ static void border_draw(lv_event_t *e)
     }
 }
 
+/* Linear through `count` stops over `span`, looping back to the first when `loop`. */
+static uint32_t gradient_at(const uint32_t *colours, int32_t count, int32_t at, int32_t span, bool loop)
+{
+    if (count <= 1 || span <= 0) {
+        return count == 1 ? colours[0] : 0xFFFFFF;
+    }
+    int32_t segments = loop ? count : count - 1;
+    int32_t scaled = LV_CLAMP(0, at, span) * segments;
+    int32_t i = LV_MIN(scaled / span, segments - 1);
+    int32_t frac = ((scaled - i * span) * 255) / span;
+    uint32_t a = colours[i];
+    uint32_t b = colours[(i + 1) % count];
+    uint32_t out = 0;
+    for (int shift = 16; shift >= 0; shift -= 8) {
+        int32_t ca = (a >> shift) & 0xFF;
+        int32_t cb = (b >> shift) & 0xFF;
+        out |= (uint32_t) (ca + ((cb - ca) * frac) / 255) << shift;
+    }
+    return out;
+}
+
+static uint32_t dim(uint32_t rgb, int32_t level)
+{
+    uint32_t out = 0;
+    for (int shift = 16; shift >= 0; shift -= 8) {
+        out |= (uint32_t) ((((rgb >> shift) & 0xFF) * level) / 255) << shift;
+    }
+    return out;
+}
+
+/* Brightness 0..255 for a pulsing line: a sine between its floor and full, on the shared clock. */
+static int32_t pulse_level(const struct decor_line *l)
+{
+    int32_t period = l->period > 0 ? l->period : 2000;
+    int32_t angle = (int32_t) ((lv_tick_get() % period) * 360 / period);
+    int32_t wave = (lv_trigo_sin(angle) + 32767) * 255 / 65534;
+    int32_t floor = l->min_pct * 255 / 100;
+    return floor + ((255 - floor) * wave) / 255;
+}
+
+static void line_draw(lv_event_t *e)
+{
+    lv_obj_t *obj = lv_event_get_target_obj(e);
+    lv_layer_t *layer = lv_event_get_layer(e);
+    const struct decor_line *l = &decor_now.lines[(int) (intptr_t) lv_event_get_user_data(e)];
+    lv_area_t box;
+    lv_obj_get_coords(obj, &box);
+
+    lv_draw_rect_dsc_t dsc;
+    lv_draw_rect_dsc_init(&dsc);
+    dsc.bg_opa = LV_OPA_COVER;
+
+    int32_t width = lv_area_get_width(&box);
+    int32_t level = l->mode == LinePulse ? pulse_level(l) : 255;
+    int32_t shift = 0;
+    if (l->mode == LineFlow && l->period > 0) {
+        shift = (int32_t) ((lv_tick_get() % l->period) * width / l->period);
+    }
+
+    for (int32_t along = 0; along < width; along += BORDER_SEGMENT) {
+        lv_area_t seg = box;
+        seg.x1 = box.x1 + along;
+        seg.x2 = LV_MIN(seg.x1 + BORDER_SEGMENT - 1, box.x2);
+        uint32_t rgb = l->mode == LineFlow
+            ? gradient_at(l->colours, l->count, (along + shift) % width, width, true)
+            : gradient_at(l->colours, l->count, along, width, false);
+        dsc.bg_color = lv_color_hex(dim(rgb, level));
+        lv_draw_rect(layer, &dsc, &seg);
+    }
+}
+
 static void border_tick(lv_timer_t *timer)
 {
     UNUSED(timer);
     border_phase += (decor_now.speed * DECOR_TICK_MS) / 1000;
     for (int i = 0; i < 4; i++) {
-        lv_obj_invalidate(border_edges[i]);
+        if (border_edges[i] != NULL) {
+            lv_obj_invalidate(border_edges[i]);
+        }
+    }
+    for (int i = 0; i < DECOR_MAX_LINES; i++) {
+        if (line_objs[i] != NULL) {
+            lv_obj_invalidate(line_objs[i]);
+        }
     }
 }
 
@@ -1136,6 +1240,12 @@ static void decor_clear(void)
             border_edges[i] = NULL;
         }
     }
+    for (int i = 0; i < DECOR_MAX_LINES; i++) {
+        if (line_objs[i] != NULL) {
+            lv_obj_delete(line_objs[i]);
+            line_objs[i] = NULL;
+        }
+    }
     if (beam_obj != NULL) {
         lv_obj_delete(beam_obj);
         beam_obj = NULL;
@@ -1161,6 +1271,16 @@ static void decor_apply(struct decor *d)
     int32_t w = panel_w();
     int32_t h = panel_h();
 
+    /* Lines first, so the border's corners sit over their ends. */
+    for (int i = 0; i < d->line_count; i++) {
+        const struct decor_line *l = &d->lines[i];
+        lv_obj_t *obj = decor_box();
+        lv_obj_set_pos(obj, l->x, l->y);
+        lv_obj_set_size(obj, l->w, l->h);
+        lv_obj_add_event_cb(obj, line_draw, LV_EVENT_DRAW_MAIN, (void *) (intptr_t) i);
+        line_objs[i] = obj;
+    }
+
     if (d->border && d->thickness > 0) {
         int32_t t = d->thickness;
         int32_t geometry[4][4] = {
@@ -1173,6 +1293,9 @@ static void decor_apply(struct decor *d)
             lv_obj_add_event_cb(edge, border_draw, LV_EVENT_DRAW_MAIN, (void *) (intptr_t) i);
             border_edges[i] = edge;
         }
+    }
+
+    if ((d->border && d->thickness > 0) || d->line_count > 0) {
         border_timer = lv_timer_create(border_tick, DECOR_TICK_MS, NULL);
     }
 
@@ -1398,6 +1521,8 @@ static bool parse_decor(struct op *op, term specs, GlobalContext *global)
     term border = globalcontext_make_atom(global, ATOM_STR("\x6", "border"));
     term beam = globalcontext_make_atom(global, ATOM_STR("\x4", "beam"));
     term glitch = globalcontext_make_atom(global, ATOM_STR("\x6", "glitch"));
+    term line = globalcontext_make_atom(global, ATOM_STR("\x4", "line"));
+    term flow = globalcontext_make_atom(global, ATOM_STR("\x4", "flow"));
 
     while (term_is_nonempty_list(specs)) {
         term spec = term_get_list_head(specs);
@@ -1423,6 +1548,16 @@ static bool parse_decor(struct op *op, term specs, GlobalContext *global)
             d->glitch_count = parse_colours(term_get_tuple_element(spec, 1), d->glitch_colours);
             d->glitch_min = int_at(spec, 2);
             d->glitch_max = int_at(spec, 3);
+        } else if (kind == line && arity == 9 && d->line_count < DECOR_MAX_LINES) {
+            struct decor_line *l = &d->lines[d->line_count++];
+            l->x = int_at(spec, 1);
+            l->y = int_at(spec, 2);
+            l->w = int_at(spec, 3);
+            l->h = int_at(spec, 4);
+            l->count = parse_colours(term_get_tuple_element(spec, 5), l->colours);
+            l->mode = term_get_tuple_element(spec, 6) == flow ? LineFlow : LinePulse;
+            l->period = int_at(spec, 7);
+            l->min_pct = int_at(spec, 8);
         }
     }
     return true;
