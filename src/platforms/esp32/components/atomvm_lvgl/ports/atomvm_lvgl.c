@@ -17,6 +17,10 @@
  *     {unimg, ImgId}
  *     {font, FontId, uf | raw8x16, Bin}  loaded once; a second load of an id is ignored
  *     {reset}                          deletes every object and image, keeps fonts
+ *     {decor, [Spec]}                  replaces the decorations drawn over everything:
+ *       {border, Thickness, PixelsPerSecond, [RGB]}  a frame whose colours travel round
+ *       {beam, RGB, PeriodMs, Height, Opa}           a line that sweeps down now and then
+ *       {glitch, [RGB], MinMs, MaxMs}                 bars that flash at random
  *   stats -> {InternalFree, DmaFree, InternalLargest, PsramFree, Refreshes}
  *
  * The mailbox handler runs on a VM scheduler thread and never calls LVGL: it
@@ -118,7 +122,8 @@ enum op_kind
     OpImg,
     OpUnimg,
     OpFont,
-    OpReset
+    OpReset,
+    OpDecor
 };
 
 static const AtomStringIntPair op_table[] = {
@@ -129,6 +134,7 @@ static const AtomStringIntPair op_table[] = {
     { ATOM_STR("\x5", "unimg"), OpUnimg },
     { ATOM_STR("\x4", "font"), OpFont },
     { ATOM_STR("\x5", "reset"), OpReset },
+    { ATOM_STR("\x5", "decor"), OpDecor },
     SELECT_INT_DEFAULT(OpInvalid)
 };
 
@@ -242,6 +248,7 @@ struct op
     struct prop_value *props;
     uint8_t *data;
     size_t size;
+    struct decor *decor;
 };
 
 struct batch
@@ -950,9 +957,260 @@ static void set_prop(int id, struct prop_value *p)
     }
 }
 
+/* ---------------------------------------------------------------------------
+ * Decor, LVGL task only
+ *
+ * Theme decorations on LVGL's top layer, over every page: a border whose
+ * colours travel round the panel, a beam that sweeps down it, and glitch
+ * bars that flash at random. Only the strips they cover are redrawn.
+ * ------------------------------------------------------------------------- */
+
+#define DECOR_MAX_COLOURS 8
+#define DECOR_GLITCH_BARS 3
+#define DECOR_TICK_MS 40
+#define BORDER_SEGMENT 4
+
+struct decor
+{
+    bool border;
+    uint8_t thickness;
+    uint16_t speed;
+    uint8_t border_count;
+    uint32_t border_colours[DECOR_MAX_COLOURS];
+
+    bool beam;
+    uint32_t beam_colour;
+    uint16_t beam_period;
+    uint8_t beam_height;
+    uint8_t beam_opa;
+
+    bool glitch;
+    uint8_t glitch_count;
+    uint32_t glitch_colours[DECOR_MAX_COLOURS];
+    uint16_t glitch_min;
+    uint16_t glitch_max;
+};
+
+static struct decor decor_now;
+static lv_obj_t *border_edges[4];
+static lv_obj_t *beam_obj;
+static lv_obj_t *glitch_bars[DECOR_GLITCH_BARS];
+static lv_timer_t *border_timer;
+static lv_timer_t *glitch_timer;
+static int32_t border_phase;
+static bool glitch_showing;
+
+static int32_t panel_w(void)
+{
+    return lv_display_get_horizontal_resolution(display);
+}
+
+static int32_t panel_h(void)
+{
+    return lv_display_get_vertical_resolution(display);
+}
+
+/* The colour at a distance round the perimeter, the palette spread evenly and looping. */
+static lv_color_t border_colour(int32_t pos)
+{
+    int32_t perimeter = 2 * (panel_w() + panel_h());
+    int32_t n = decor_now.border_count;
+    if (n <= 1) {
+        return lv_color_hex(n == 1 ? decor_now.border_colours[0] : 0xFFFFFF);
+    }
+    int32_t at = ((pos + border_phase) % perimeter + perimeter) % perimeter;
+    int32_t scaled = at * n;
+    int32_t i = scaled / perimeter;
+    int32_t frac = (scaled % perimeter) * 255 / perimeter;
+    uint32_t a = decor_now.border_colours[i];
+    uint32_t b = decor_now.border_colours[(i + 1) % n];
+    int32_t r = ((a >> 16) & 0xFF) + ((((int32_t) ((b >> 16) & 0xFF)) - ((a >> 16) & 0xFF)) * frac) / 255;
+    int32_t g = ((a >> 8) & 0xFF) + ((((int32_t) ((b >> 8) & 0xFF)) - ((a >> 8) & 0xFF)) * frac) / 255;
+    int32_t bl = (a & 0xFF) + ((((int32_t) (b & 0xFF)) - (a & 0xFF)) * frac) / 255;
+    return lv_color_make(r, g, bl);
+}
+
+/* Perimeter position of a point on an edge, clockwise from the top-left corner. */
+static int32_t perimeter_pos(int edge, int32_t along)
+{
+    int32_t w = panel_w();
+    int32_t h = panel_h();
+    switch (edge) {
+        case 0:
+            return along;
+        case 1:
+            return w + along;
+        case 2:
+            return w + h + (w - along);
+        default:
+            return 2 * w + h + (h - along);
+    }
+}
+
+static void border_draw(lv_event_t *e)
+{
+    lv_obj_t *obj = lv_event_get_target_obj(e);
+    lv_layer_t *layer = lv_event_get_layer(e);
+    int edge = (int) (intptr_t) lv_event_get_user_data(e);
+    lv_area_t box;
+    lv_obj_get_coords(obj, &box);
+
+    lv_draw_rect_dsc_t dsc;
+    lv_draw_rect_dsc_init(&dsc);
+    dsc.bg_opa = LV_OPA_COVER;
+
+    bool across = edge == 0 || edge == 2;
+    int32_t length = across ? lv_area_get_width(&box) : lv_area_get_height(&box);
+    int32_t offset = across ? box.x1 : box.y1;
+
+    for (int32_t along = 0; along < length; along += BORDER_SEGMENT) {
+        lv_area_t seg = box;
+        if (across) {
+            seg.x1 = box.x1 + along;
+            seg.x2 = LV_MIN(seg.x1 + BORDER_SEGMENT - 1, box.x2);
+        } else {
+            seg.y1 = box.y1 + along;
+            seg.y2 = LV_MIN(seg.y1 + BORDER_SEGMENT - 1, box.y2);
+        }
+        dsc.bg_color = border_colour(perimeter_pos(edge, offset + along));
+        lv_draw_rect(layer, &dsc, &seg);
+    }
+}
+
+static void border_tick(lv_timer_t *timer)
+{
+    UNUSED(timer);
+    border_phase += (decor_now.speed * DECOR_TICK_MS) / 1000;
+    for (int i = 0; i < 4; i++) {
+        lv_obj_invalidate(border_edges[i]);
+    }
+}
+
+static lv_obj_t *decor_box(void)
+{
+    lv_obj_t *obj = lv_obj_create(lv_layer_top());
+    plain(obj);
+    return obj;
+}
+
+static void glitch_tick(lv_timer_t *timer)
+{
+    if (glitch_showing) {
+        for (int i = 0; i < DECOR_GLITCH_BARS; i++) {
+            lv_obj_set_hidden(glitch_bars[i], true);
+        }
+        glitch_showing = false;
+        lv_timer_set_period(timer, lv_rand(decor_now.glitch_min, decor_now.glitch_max));
+        return;
+    }
+
+    int32_t w = panel_w();
+    int32_t h = panel_h();
+    for (int i = 0; i < DECOR_GLITCH_BARS; i++) {
+        lv_obj_t *bar = glitch_bars[i];
+        int32_t height = lv_rand(1, 4);
+        int32_t width = lv_rand(w / 4, w);
+        uint32_t colour = decor_now.glitch_colours[lv_rand(0, decor_now.glitch_count - 1)];
+        lv_obj_set_pos(bar, lv_rand(0, w - width), lv_rand(0, h - height));
+        lv_obj_set_size(bar, width, height);
+        lv_obj_set_style_bg_color(bar, lv_color_hex(colour), 0);
+        lv_obj_set_hidden(bar, false);
+    }
+    glitch_showing = true;
+    lv_timer_set_period(timer, lv_rand(60, 140));
+}
+
+static void decor_clear(void)
+{
+    if (border_timer != NULL) {
+        lv_timer_delete(border_timer);
+        border_timer = NULL;
+    }
+    if (glitch_timer != NULL) {
+        lv_timer_delete(glitch_timer);
+        glitch_timer = NULL;
+    }
+    for (int i = 0; i < 4; i++) {
+        if (border_edges[i] != NULL) {
+            lv_obj_delete(border_edges[i]);
+            border_edges[i] = NULL;
+        }
+    }
+    if (beam_obj != NULL) {
+        lv_obj_delete(beam_obj);
+        beam_obj = NULL;
+    }
+    for (int i = 0; i < DECOR_GLITCH_BARS; i++) {
+        if (glitch_bars[i] != NULL) {
+            lv_obj_delete(glitch_bars[i]);
+            glitch_bars[i] = NULL;
+        }
+    }
+    glitch_showing = false;
+}
+
+static void set_beam_y(void *obj, int32_t y)
+{
+    lv_obj_set_y(obj, y);
+}
+
+static void decor_apply(struct decor *d)
+{
+    decor_clear();
+    decor_now = *d;
+    int32_t w = panel_w();
+    int32_t h = panel_h();
+
+    if (d->border && d->thickness > 0) {
+        int32_t t = d->thickness;
+        int32_t geometry[4][4] = {
+            { 0, 0, w, t }, { w - t, t, t, h - 2 * t }, { 0, h - t, w, t }, { 0, t, t, h - 2 * t }
+        };
+        for (int i = 0; i < 4; i++) {
+            lv_obj_t *edge = decor_box();
+            lv_obj_set_pos(edge, geometry[i][0], geometry[i][1]);
+            lv_obj_set_size(edge, geometry[i][2], geometry[i][3]);
+            lv_obj_add_event_cb(edge, border_draw, LV_EVENT_DRAW_MAIN, (void *) (intptr_t) i);
+            border_edges[i] = edge;
+        }
+        border_timer = lv_timer_create(border_tick, DECOR_TICK_MS, NULL);
+    }
+
+    if (d->beam && d->beam_period > 0) {
+        beam_obj = decor_box();
+        lv_obj_set_size(beam_obj, w, d->beam_height);
+        lv_obj_set_style_bg_color(beam_obj, lv_color_hex(d->beam_colour), 0);
+        lv_obj_set_style_bg_opa(beam_obj, d->beam_opa, 0);
+
+        /* Sweeps down in a third of the period, then waits out the rest. */
+        lv_anim_t a;
+        lv_anim_init(&a);
+        lv_anim_set_var(&a, beam_obj);
+        lv_anim_set_exec_cb(&a, set_beam_y);
+        lv_anim_set_values(&a, -d->beam_height, h);
+        lv_anim_set_duration(&a, d->beam_period / 3);
+        lv_anim_set_repeat_delay(&a, d->beam_period - d->beam_period / 3);
+        lv_anim_set_repeat_count(&a, LV_ANIM_REPEAT_INFINITE);
+        lv_anim_start(&a);
+    }
+
+    if (d->glitch && d->glitch_count > 0 && d->glitch_max >= d->glitch_min) {
+        for (int i = 0; i < DECOR_GLITCH_BARS; i++) {
+            lv_obj_t *bar = decor_box();
+            lv_obj_set_style_bg_opa(bar, LV_OPA_80, 0);
+            lv_obj_set_hidden(bar, true);
+            glitch_bars[i] = bar;
+        }
+        glitch_timer = lv_timer_create(glitch_tick, lv_rand(d->glitch_min, d->glitch_max), NULL);
+    }
+}
+
 static void apply_op(struct op *op)
 {
     switch (op->kind) {
+        case OpDecor:
+            decor_apply(op->decor);
+            break;
         case OpReset:
             for (int i = MAX_OBJS - 1; i >= 0; i--) {
                 delete_obj(i);
@@ -1007,6 +1265,7 @@ static void free_batch(struct batch *b)
         }
         heap_caps_free(op->props);
         heap_caps_free(op->data);
+        heap_caps_free(op->decor);
     }
     heap_caps_free(b->ops);
     heap_caps_free(b);
@@ -1116,6 +1375,59 @@ static bool parse_props(struct op *op, term list, GlobalContext *global)
     return true;
 }
 
+static uint8_t parse_colours(term list, uint32_t *out)
+{
+    uint8_t n = 0;
+    while (term_is_nonempty_list(list) && n < DECOR_MAX_COLOURS) {
+        term c = term_get_list_head(list);
+        if (term_is_integer(c)) {
+            out[n++] = (uint32_t) term_to_int(c);
+        }
+        list = term_get_list_tail(list);
+    }
+    return n;
+}
+
+static bool parse_decor(struct op *op, term specs, GlobalContext *global)
+{
+    struct decor *d = heap_caps_calloc(1, sizeof(struct decor), PSRAM_CAPS);
+    if (d == NULL) {
+        return false;
+    }
+    op->decor = d;
+    term border = globalcontext_make_atom(global, ATOM_STR("\x6", "border"));
+    term beam = globalcontext_make_atom(global, ATOM_STR("\x4", "beam"));
+    term glitch = globalcontext_make_atom(global, ATOM_STR("\x6", "glitch"));
+
+    while (term_is_nonempty_list(specs)) {
+        term spec = term_get_list_head(specs);
+        specs = term_get_list_tail(specs);
+        if (!term_is_tuple(spec) || term_get_tuple_arity(spec) < 1) {
+            continue;
+        }
+        term kind = term_get_tuple_element(spec, 0);
+        int arity = term_get_tuple_arity(spec);
+        if (kind == border && arity == 4) {
+            d->border = true;
+            d->thickness = int_at(spec, 1);
+            d->speed = int_at(spec, 2);
+            d->border_count = parse_colours(term_get_tuple_element(spec, 3), d->border_colours);
+        } else if (kind == beam && arity == 5) {
+            d->beam = true;
+            d->beam_colour = (uint32_t) int_at(spec, 1);
+            d->beam_period = int_at(spec, 2);
+            d->beam_height = int_at(spec, 3);
+            d->beam_opa = int_at(spec, 4);
+        } else if (kind == glitch && arity == 4) {
+            d->glitch = true;
+            d->glitch_count = parse_colours(term_get_tuple_element(spec, 1), d->glitch_colours);
+            d->glitch_min = int_at(spec, 2);
+            d->glitch_max = int_at(spec, 3);
+        }
+    }
+    return true;
+}
+
 static bool parse_op(struct op *op, term t, GlobalContext *global)
 {
     if (!term_is_tuple(t) || term_get_tuple_arity(t) < 1) {
@@ -1124,6 +1436,9 @@ static bool parse_op(struct op *op, term t, GlobalContext *global)
     op->kind = interop_atom_term_select_int(op_table, term_get_tuple_element(t, 0), global);
     if (op->kind == OpReset) {
         return true;
+    }
+    if (op->kind == OpDecor) {
+        return term_get_tuple_arity(t) == 2 && parse_decor(op, term_get_tuple_element(t, 1), global);
     }
     if (term_get_tuple_arity(t) < 2) {
         return false;
