@@ -11,6 +11,8 @@
  *                                      is a label that scrolls round when wider than w
  *     {del, Id}
  *     {set, Id, [{Prop, Value}]}      x y w h bg fg text font src sx sy ox oy hidden recolor speed
+ *                                      fx fx_dir fx_steps fx_ms fx_row fx_left fx_noise:
+ *                                      a label plays a text effect on its own text, see below
  *     {img, ImgId, rgba8888 | a8, W, H, Bin}
  *     {unimg, ImgId}
  *     {font, FontId, uf | raw8x16, Bin}  loaded once; a second load of an id is ignored
@@ -165,7 +167,14 @@ enum prop
     PropOffsetY,
     PropHidden,
     PropRecolor,
-    PropSpeed
+    PropSpeed,
+    PropFx,
+    PropFxDir,
+    PropFxSteps,
+    PropFxMs,
+    PropFxRow,
+    PropFxLeft,
+    PropFxNoise
 };
 
 static const AtomStringIntPair prop_table[] = {
@@ -185,6 +194,13 @@ static const AtomStringIntPair prop_table[] = {
     { ATOM_STR("\x6", "hidden"), PropHidden },
     { ATOM_STR("\x7", "recolor"), PropRecolor },
     { ATOM_STR("\x5", "speed"), PropSpeed },
+    { ATOM_STR("\x2", "fx"), PropFx },
+    { ATOM_STR("\x6", "fx_dir"), PropFxDir },
+    { ATOM_STR("\x8", "fx_steps"), PropFxSteps },
+    { ATOM_STR("\x5", "fx_ms"), PropFxMs },
+    { ATOM_STR("\x6", "fx_row"), PropFxRow },
+    { ATOM_STR("\x7", "fx_left"), PropFxLeft },
+    { ATOM_STR("\x8", "fx_noise"), PropFxNoise },
     SELECT_INT_DEFAULT(PropInvalid)
 };
 
@@ -516,8 +532,276 @@ static void plain(lv_obj_t *obj)
     lv_obj_set_clickable(obj, false);
 }
 
+/* ---------------------------------------------------------------------------
+ * Text effects, LVGL task only
+ *
+ * A label can play an effect on its own text, a frame every fx_ms, the same
+ * four the Elixir side drew a frame at a time: decrypt, rain, wipe, slide.
+ * `in` brings the text in and leaves it whole; `out` runs the effect
+ * backwards and leaves its first frame. Cells are codepoints; rows split on
+ * newlines, and fx_row numbers the first row so rain can fall across lines.
+ * ------------------------------------------------------------------------- */
+
+enum fx_kind
+{
+    FxNone = 0,
+    FxDecrypt,
+    FxRain,
+    FxWipe,
+    FxSlide
+};
+
+#define FX_MAX_ROWS 8
+
+struct fx_params
+{
+    uint8_t kind;
+    uint8_t out;
+    uint8_t left;
+    uint8_t block;
+    uint16_t steps;
+    uint16_t ms;
+    int16_t row;
+    bool touched;
+};
+
+struct fx
+{
+    struct fx_params p;
+    uint16_t frame;
+    uint16_t len;
+    uint32_t *target;
+    char *text;
+    lv_timer_t *timer;
+    int id;
+};
+
+static struct fx *fxs[MAX_OBJS];
+static struct fx_params fx_params[MAX_OBJS];
+
+/* Scrambled cells: shades, blocks, box lines and a few symbols in code page
+ * 437 for the built-in font, plain ASCII for the others. */
+static const uint32_t fx_block_noise[] = { 0xB0, 0xB1, 0xB2, 0xDB, 0xDC, 0xDF, 0xB3, 0xC4, 0xC5,
+    0xCE, 0xBA, 0xCD, 0xF9, 0xFE, '0', '1', '/', '\\', '<', '>', '*', '+', '#', '%' };
+static const uint32_t fx_ascii_noise[] = { '0', '1', '/', '\\', '<', '>', '*', '+', '#', '%', '=', '?', '$', '&' };
+static const uint32_t fx_block_edge[] = { 0xB2, 0xB1, 0xB0 };
+static const uint32_t fx_ascii_edge[] = { '#', '=', '-' };
+
+/* The same hash as Badge.Marquee, so a scramble looks as it did. */
+static int32_t fx_hash(int32_t r, int32_t c, int32_t salt)
+{
+    int32_t x = r * 13 + c * 29 + salt * 7 + 11;
+    return (x * x + 3 * x) % 1009;
+}
+
+static uint32_t fx_noise(const struct fx *f, int32_t r, int32_t c, int32_t k)
+{
+    int32_t h = fx_hash(r, c, k);
+    return f->p.block ? fx_block_noise[h % (int32_t) (sizeof(fx_block_noise) / 4)]
+                      : fx_ascii_noise[h % (int32_t) (sizeof(fx_ascii_noise) / 4)];
+}
+
+static uint32_t fx_cell(const struct fx *f, const uint32_t *row, int32_t width, int32_t r, int32_t c, int32_t k)
+{
+    uint32_t t = row[c];
+    int32_t steps = f->p.steps;
+
+    switch (f->p.kind) {
+        case FxDecrypt:
+            if (t == ' ') {
+                return ' ';
+            }
+            return k > fx_hash(r, c, 0) % 9 ? t : fx_noise(f, r, c, k);
+
+        case FxRain: {
+            int32_t head = k - fx_hash(0, c, 1) % 8;
+            if (head > r) {
+                return t;
+            }
+            return head == r ? fx_noise(f, r, c, k) : ' ';
+        }
+
+        case FxWipe: {
+            int32_t edge = (4 * k * width) / 40 - 2;
+            if (c < edge) {
+                return t;
+            }
+            if (c <= edge + 2) {
+                return f->p.block ? fx_block_edge[c - edge] : fx_ascii_edge[c - edge];
+            }
+            return ' ';
+        }
+
+        case FxSlide: {
+            int32_t offset = (5 * (steps - k) * width) / 40;
+            if (offset >= width) {
+                return ' ';
+            }
+            if (f->p.left) {
+                return c < offset ? ' ' : row[c - offset];
+            }
+            return c + offset < width ? row[c + offset] : ' ';
+        }
+
+        default:
+            return t;
+    }
+}
+
+static char *utf8_put(char *out, uint32_t cp)
+{
+    if (cp < 0x80) {
+        *out++ = (char) cp;
+    } else if (cp < 0x800) {
+        *out++ = (char) (0xC0 | (cp >> 6));
+        *out++ = (char) (0x80 | (cp & 0x3F));
+    } else {
+        *out++ = (char) (0xE0 | (cp >> 12));
+        *out++ = (char) (0x80 | ((cp >> 6) & 0x3F));
+        *out++ = (char) (0x80 | (cp & 0x3F));
+    }
+    return out;
+}
+
+/* Draws effect frame k: `in` counts up to the whole text, `out` counts back down. */
+static void fx_draw(struct fx *f, int32_t k)
+{
+    char *out = f->text;
+    int32_t r = 0;
+    uint16_t start = 0;
+
+    while (start <= f->len) {
+        uint16_t end = start;
+        while (end < f->len && f->target[end] != '\n') {
+            end++;
+        }
+        int32_t width = end - start;
+        for (int32_t c = 0; c < width; c++) {
+            out = utf8_put(out, fx_cell(f, f->target + start, width, f->p.row + r, c, k));
+        }
+        if (end < f->len) {
+            *out++ = '\n';
+        }
+        start = end + 1;
+        r++;
+    }
+    *out = '\0';
+    lv_label_set_text(objs[f->id], f->text);
+}
+
+static void fx_stop(int id)
+{
+    struct fx *f = fxs[id];
+    if (f == NULL) {
+        return;
+    }
+    lv_timer_delete(f->timer);
+    heap_caps_free(f->target);
+    heap_caps_free(f->text);
+    heap_caps_free(f);
+    fxs[id] = NULL;
+}
+
+static void fx_tick(lv_timer_t *timer)
+{
+    struct fx *f = lv_timer_get_user_data(timer);
+    f->frame++;
+
+    if (f->frame >= f->p.steps) {
+        /* In leaves the text whole; out leaves the effect's first frame. */
+        if (f->p.out) {
+            fx_draw(f, 0);
+        } else {
+            char *out = f->text;
+            for (uint16_t i = 0; i < f->len; i++) {
+                out = utf8_put(out, f->target[i]);
+            }
+            *out = '\0';
+            lv_label_set_text(objs[f->id], f->text);
+        }
+        fx_stop(f->id);
+        return;
+    }
+    fx_draw(f, f->p.out ? f->p.steps - 1 - f->frame : f->frame);
+}
+
+/* Takes the label's current text as the effect's target and starts it. */
+static void fx_start(int id)
+{
+    fx_stop(id);
+    struct fx_params p = fx_params[id];
+    if (p.kind == FxNone || p.steps == 0 || objs[id] == NULL) {
+        return;
+    }
+
+    const char *text = lv_label_get_text(objs[id]);
+    size_t bytes = strlen(text);
+    struct fx *f = heap_caps_calloc(1, sizeof(struct fx), PSRAM_CAPS);
+    f->target = heap_caps_calloc(bytes + 1, sizeof(uint32_t), PSRAM_CAPS);
+    f->text = heap_caps_calloc(bytes * 3 + 4, 1, PSRAM_CAPS);
+
+    /* UTF-8 to codepoints; anything malformed is taken a byte at a time. */
+    const uint8_t *in = (const uint8_t *) text;
+    uint16_t n = 0;
+    for (size_t i = 0; i < bytes;) {
+        uint32_t cp = in[i];
+        if ((cp & 0xE0) == 0xC0 && i + 1 < bytes) {
+            cp = ((cp & 0x1F) << 6) | (in[i + 1] & 0x3F);
+            i += 2;
+        } else if ((cp & 0xF0) == 0xE0 && i + 2 < bytes) {
+            cp = ((cp & 0x0F) << 12) | ((in[i + 1] & 0x3F) << 6) | (in[i + 2] & 0x3F);
+            i += 3;
+        } else {
+            i++;
+        }
+        f->target[n++] = cp;
+    }
+
+    f->p = p;
+    f->len = n;
+    f->id = id;
+    f->timer = lv_timer_create(fx_tick, p.ms > 0 ? p.ms : 200, f);
+    fxs[id] = f;
+    fx_draw(f, p.out ? p.steps - 1 : 0);
+}
+
+static void set_fx_param(int id, int key, int32_t v)
+{
+    struct fx_params *p = &fx_params[id];
+    switch (key) {
+        case PropFx:
+            p->kind = v;
+            break;
+        case PropFxDir:
+            p->out = v != 0;
+            break;
+        case PropFxSteps:
+            p->steps = v;
+            break;
+        case PropFxMs:
+            p->ms = v;
+            break;
+        case PropFxRow:
+            p->row = v;
+            break;
+        case PropFxLeft:
+            p->left = v != 0;
+            break;
+        case PropFxNoise:
+            p->block = v != 0;
+            break;
+        default:
+            return;
+    }
+    p->touched = true;
+}
+
 static void delete_obj(int id)
 {
+    fx_stop(id);
+    if (id >= 0 && id < MAX_OBJS) {
+        memset(&fx_params[id], 0, sizeof(struct fx_params));
+    }
     if (id < 0 || id >= MAX_OBJS || objs[id] == NULL) {
         return;
     }
@@ -610,6 +894,9 @@ static void set_prop(int id, struct prop_value *p)
         case PropText:
             if (type == TypeLabel || type == TypeMarquee) {
                 lv_label_set_text(obj, p->text != NULL ? p->text : "");
+                if (fx_params[id].kind != FxNone) {
+                    fx_params[id].touched = true;
+                }
             }
             break;
         case PropFont:
@@ -645,6 +932,15 @@ static void set_prop(int id, struct prop_value *p)
                 lv_obj_set_style_image_recolor_opa(obj, LV_OPA_COVER, 0);
             }
             break;
+        case PropFx:
+        case PropFxDir:
+        case PropFxSteps:
+        case PropFxMs:
+        case PropFxRow:
+        case PropFxLeft:
+        case PropFxNoise:
+            set_fx_param(id, p->key, v);
+            break;
         case PropSpeed:
             /* Pixels a second, however long the text. */
             lv_obj_set_style_anim_duration(obj, lv_anim_speed(v > 0 ? v : 40), 0);
@@ -675,6 +971,11 @@ static void apply_op(struct op *op)
             if (op->id < MAX_OBJS && objs[op->id] != NULL) {
                 for (uint16_t i = 0; i < op->prop_count; i++) {
                     set_prop(op->id, &op->props[i]);
+                }
+                /* A new text or effect restarts the effect, once every property has landed. */
+                if (fx_params[op->id].touched) {
+                    fx_params[op->id].touched = false;
+                    fx_start(op->id);
                 }
             } else {
                 dropped_ops++;
