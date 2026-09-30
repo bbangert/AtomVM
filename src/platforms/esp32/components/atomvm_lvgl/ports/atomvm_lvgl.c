@@ -15,7 +15,9 @@
  *                                      a label plays a text effect on its own text, see below
  *                                      mx my mdir mdelay mms mease: the object glides in from
  *                                      (x + mx, y + my), or out to there and hides, see below
- *     {img, ImgId, rgba8888 | a8, W, H, Bin}
+ *     {img, ImgId, rgba8888 | a8, W, H, Bin[, Scale]}
+ *                                      Scale enlarges it once, nearest neighbour; a fully
+ *                                      opaque RGBA image is kept as RGB565, drawn unblended
  *     {unimg, ImgId}
  *     {font, FontId, uf | raw8x16, Bin}  loaded once; a second load of an id is ignored
  *     {reset}                          deletes every object and image, keeps fonts
@@ -260,6 +262,7 @@ struct op
     uint16_t id;
     uint16_t w;
     uint16_t h;
+    uint8_t scale;
     uint16_t prop_count;
     struct prop_value *props;
     uint8_t *data;
@@ -507,29 +510,66 @@ static void load_font(int id, int format, uint8_t *data, size_t size)
  * Images
  * ------------------------------------------------------------------------- */
 
-/* LVGL task only. Takes ownership of `data`; RGBA is reordered to LVGL's BGRA. */
-static void load_image(int id, int format, int w, int h, uint8_t *data, size_t size)
+/*
+ * LVGL task only. Takes ownership of `data`. Enlarged `scale` times once here
+ * rather than on every frame; RGBA with no transparency becomes RGB565, which
+ * LVGL copies straight to the panel, and the rest LVGL's BGRA.
+ */
+static void load_image(int id, int format, int w, int h, int scale, uint8_t *data, size_t size)
 {
-    size_t bpp = format == FmtA8 ? 1 : 4;
-    if (id < 0 || id >= MAX_IMAGES || images[id] != NULL || size < (size_t) w * h * bpp) {
+    size_t in_bpp = format == FmtA8 ? 1 : 4;
+    if (id < 0 || id >= MAX_IMAGES || images[id] != NULL || size < (size_t) w * h * in_bpp) {
         heap_caps_free(data);
         return;
     }
-    if (format == FmtRgba8888) {
-        for (size_t i = 0; i < (size_t) w * h * 4; i += 4) {
-            uint8_t r = data[i];
-            data[i] = data[i + 2];
-            data[i + 2] = r;
+    if (scale < 1) {
+        scale = 1;
+    }
+
+    bool opaque = format == FmtRgba8888;
+    for (size_t i = 3; opaque && i < (size_t) w * h * 4; i += 4) {
+        opaque = data[i] == 0xFF;
+    }
+
+    int out_w = w * scale;
+    int out_h = h * scale;
+    size_t out_bpp = format == FmtA8 ? 1 : (opaque ? 2 : 4);
+    uint8_t *out = heap_caps_malloc((size_t) out_w * out_h * out_bpp, PSRAM_CAPS);
+    if (out == NULL) {
+        heap_caps_free(data);
+        return;
+    }
+
+    for (int y = 0; y < out_h; y++) {
+        const uint8_t *row = data + (size_t) (y / scale) * w * in_bpp;
+        uint8_t *dst = out + (size_t) y * out_w * out_bpp;
+        for (int x = 0; x < out_w; x++) {
+            const uint8_t *px = row + (size_t) (x / scale) * in_bpp;
+            if (format == FmtA8) {
+                dst[x] = px[0];
+            } else if (opaque) {
+                uint16_t rgb565 = ((px[0] & 0xF8) << 8) | ((px[1] & 0xFC) << 3) | (px[2] >> 3);
+                dst[x * 2] = rgb565 & 0xFF;
+                dst[x * 2 + 1] = rgb565 >> 8;
+            } else {
+                dst[x * 4] = px[2];
+                dst[x * 4 + 1] = px[1];
+                dst[x * 4 + 2] = px[0];
+                dst[x * 4 + 3] = px[3];
+            }
         }
     }
+    heap_caps_free(data);
+
     lv_image_dsc_t *dsc = heap_caps_calloc(1, sizeof(lv_image_dsc_t), PSRAM_CAPS);
     dsc->header.magic = LV_IMAGE_HEADER_MAGIC;
-    dsc->header.cf = format == FmtA8 ? LV_COLOR_FORMAT_A8 : LV_COLOR_FORMAT_ARGB8888;
-    dsc->header.w = w;
-    dsc->header.h = h;
-    dsc->header.stride = w * bpp;
-    dsc->data_size = (uint32_t) w * h * bpp;
-    dsc->data = data;
+    dsc->header.cf = format == FmtA8 ? LV_COLOR_FORMAT_A8
+        : (opaque ? LV_COLOR_FORMAT_RGB565 : LV_COLOR_FORMAT_ARGB8888);
+    dsc->header.w = out_w;
+    dsc->header.h = out_h;
+    dsc->header.stride = out_w * out_bpp;
+    dsc->data_size = (uint32_t) out_w * out_h * out_bpp;
+    dsc->data = out;
     images[id] = dsc;
 }
 
@@ -1526,7 +1566,7 @@ static void apply_op(struct op *op)
             }
             break;
         case OpImg:
-            load_image(op->id, op->format, op->w, op->h, op->data, op->size);
+            load_image(op->id, op->format, op->w, op->h, op->scale, op->data, op->size);
             op->data = NULL;
             break;
         case OpUnimg:
@@ -1753,9 +1793,10 @@ static bool parse_op(struct op *op, term t, GlobalContext *global)
         case OpSet:
             return term_get_tuple_arity(t) == 3 && parse_props(op, term_get_tuple_element(t, 2), global);
         case OpImg:
-            if (term_get_tuple_arity(t) != 6) {
+            if (term_get_tuple_arity(t) != 6 && term_get_tuple_arity(t) != 7) {
                 return false;
             }
+            op->scale = term_get_tuple_arity(t) == 7 ? int_at(t, 6) : 1;
             op->format = interop_atom_term_select_int(format_table, term_get_tuple_element(t, 2), global);
             op->w = int_at(t, 3);
             op->h = int_at(t, 4);
