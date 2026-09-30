@@ -13,6 +13,8 @@
  *     {set, Id, [{Prop, Value}]}      x y w h bg fg text font src sx sy ox oy hidden recolor speed
  *                                      fx fx_dir fx_steps fx_ms fx_row fx_left fx_noise:
  *                                      a label plays a text effect on its own text, see below
+ *                                      mx my mdir mdelay mms mease: the object glides in from
+ *                                      (x + mx, y + my), or out to there and hides, see below
  *     {img, ImgId, rgba8888 | a8, W, H, Bin}
  *     {unimg, ImgId}
  *     {font, FontId, uf | raw8x16, Bin}  loaded once; a second load of an id is ignored
@@ -182,7 +184,13 @@ enum prop
     PropFxMs,
     PropFxRow,
     PropFxLeft,
-    PropFxNoise
+    PropFxNoise,
+    PropMoveX,
+    PropMoveY,
+    PropMoveDir,
+    PropMoveDelay,
+    PropMoveMs,
+    PropMoveEase
 };
 
 static const AtomStringIntPair prop_table[] = {
@@ -209,6 +217,12 @@ static const AtomStringIntPair prop_table[] = {
     { ATOM_STR("\x6", "fx_row"), PropFxRow },
     { ATOM_STR("\x7", "fx_left"), PropFxLeft },
     { ATOM_STR("\x8", "fx_noise"), PropFxNoise },
+    { ATOM_STR("\x2", "mx"), PropMoveX },
+    { ATOM_STR("\x2", "my"), PropMoveY },
+    { ATOM_STR("\x4", "mdir"), PropMoveDir },
+    { ATOM_STR("\x6", "mdelay"), PropMoveDelay },
+    { ATOM_STR("\x3", "mms"), PropMoveMs },
+    { ATOM_STR("\x5", "mease"), PropMoveEase },
     SELECT_INT_DEFAULT(PropInvalid)
 };
 
@@ -805,8 +819,145 @@ static void set_fx_param(int id, int key, int32_t v)
     p->touched = true;
 }
 
+/* ---------------------------------------------------------------------------
+ * Motion, LVGL task only
+ *
+ * An object can glide in from an offset to where it was placed, appearing
+ * when its delay runs out, or glide out to an offset after its delay and
+ * hide. LVGL's own animations do the moving, at its full frame rate.
+ * ------------------------------------------------------------------------- */
+
+struct motion_params
+{
+    int16_t dx;
+    int16_t dy;
+    uint8_t leave;
+    uint8_t ease;
+    uint16_t delay;
+    uint16_t ms;
+    bool touched;
+};
+
+static struct motion_params motions[MAX_OBJS];
+
+static void move_x(void *obj, int32_t v)
+{
+    lv_obj_set_x(obj, v);
+}
+
+static void move_y(void *obj, int32_t v)
+{
+    lv_obj_set_y(obj, v);
+}
+
+static void motion_show(lv_anim_t *a)
+{
+    lv_obj_set_hidden(a->var, false);
+}
+
+static void motion_hide(lv_anim_t *a)
+{
+    lv_obj_set_hidden(a->var, true);
+}
+
+static lv_anim_path_cb_t motion_path(int ease)
+{
+    switch (ease) {
+        case 1:
+            return lv_anim_path_ease_out;
+        case 2:
+            return lv_anim_path_overshoot;
+        case 3:
+            return lv_anim_path_bounce;
+        default:
+            return lv_anim_path_linear;
+    }
+}
+
+/* One animation per axis that moves; the first carries the show or hide. */
+static void motion_axis(lv_obj_t *obj, const struct motion_params *m, lv_anim_exec_xcb_t exec,
+    int32_t at, int32_t offset, bool first)
+{
+    lv_anim_t a;
+    lv_anim_init(&a);
+    lv_anim_set_var(&a, obj);
+    lv_anim_set_exec_cb(&a, exec);
+    lv_anim_set_duration(&a, m->ms > 0 ? m->ms : 200);
+    lv_anim_set_delay(&a, m->delay);
+    lv_anim_set_path_cb(&a, motion_path(m->ease));
+    if (m->leave) {
+        lv_anim_set_values(&a, at, at + offset);
+        if (first) {
+            lv_anim_set_completed_cb(&a, motion_hide);
+        }
+    } else {
+        lv_anim_set_values(&a, at + offset, at);
+        lv_anim_set_early_apply(&a, true);
+        if (first) {
+            lv_anim_set_start_cb(&a, motion_show);
+        }
+    }
+    lv_anim_start(&a);
+}
+
+static void motion_start(int id)
+{
+    lv_obj_t *obj = objs[id];
+    const struct motion_params *m = &motions[id];
+
+    lv_anim_delete(obj, move_x);
+    lv_anim_delete(obj, move_y);
+
+    int32_t x = lv_obj_get_x_aligned(obj);
+    int32_t y = lv_obj_get_y_aligned(obj);
+
+    /* Arriving objects wait out of sight; a leaving one stays until it has gone. */
+    if (!m->leave) {
+        lv_obj_set_hidden(obj, true);
+    }
+    bool first = true;
+    if (m->dx != 0 || m->dy == 0) {
+        motion_axis(obj, m, move_x, x, m->dx, first);
+        first = false;
+    }
+    if (m->dy != 0) {
+        motion_axis(obj, m, move_y, y, m->dy, first);
+    }
+}
+
+static void set_motion_param(int id, int key, int32_t v)
+{
+    struct motion_params *m = &motions[id];
+    switch (key) {
+        case PropMoveX:
+            m->dx = v;
+            break;
+        case PropMoveY:
+            m->dy = v;
+            break;
+        case PropMoveDir:
+            m->leave = v != 0;
+            break;
+        case PropMoveDelay:
+            m->delay = v;
+            break;
+        case PropMoveMs:
+            m->ms = v;
+            break;
+        case PropMoveEase:
+            m->ease = v;
+            break;
+        default:
+            return;
+    }
+    m->touched = true;
+}
+
 static void delete_obj(int id)
 {
+    if (id >= 0 && id < MAX_OBJS) {
+        memset(&motions[id], 0, sizeof(struct motion_params));
+    }
     fx_stop(id);
     if (id >= 0 && id < MAX_OBJS) {
         memset(&fx_params[id], 0, sizeof(struct fx_params));
@@ -949,6 +1100,14 @@ static void set_prop(int id, struct prop_value *p)
         case PropFxLeft:
         case PropFxNoise:
             set_fx_param(id, p->key, v);
+            break;
+        case PropMoveX:
+        case PropMoveY:
+        case PropMoveDir:
+        case PropMoveDelay:
+        case PropMoveMs:
+        case PropMoveEase:
+            set_motion_param(id, p->key, v);
             break;
         case PropSpeed:
             /* Pixels a second, however long the text. */
@@ -1357,6 +1516,10 @@ static void apply_op(struct op *op)
                 if (fx_params[op->id].touched) {
                     fx_params[op->id].touched = false;
                     fx_start(op->id);
+                }
+                if (motions[op->id].touched) {
+                    motions[op->id].touched = false;
+                    motion_start(op->id);
                 }
             } else {
                 dropped_ops++;
